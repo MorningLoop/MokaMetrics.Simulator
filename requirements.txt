@@ -1,0 +1,22 @@
+# CoffeeMek Production Simulator Dependencies
+# Core async libraries
+aiokafka>=0.8.0
+aiohttp>=3.8.0
+
+# Configuration and data handling
+PyYAML>=6.0
+pytz>=2023.3
+
+# HTTP requests (used in health check)
+requests>=2.31.0
+
+# Optional: For better JSON handling and performance
+ujson>=5.7.0
+
+# Control interfaces
+rich>=13.0.0  # For console interface with beautiful formatting
+aiohttp-cors>=0.7.0  # For web interface CORS support
+
+# Development and testing (optional)
+pytest>=7.4.0
+pytest-asyncio>=0.21.0

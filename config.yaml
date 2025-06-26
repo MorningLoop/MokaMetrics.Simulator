@@ -1,0 +1,71 @@
+# CoffeeMek Production Simulator Configuration
+
+# Kafka Configuration
+kafka:
+  bootstrap_servers: "165.227.168.240:9093"
+  topics:
+    input: "coffeemek.orders.new_lots"
+    telemetry_prefix: "mokametrics.telemetry"
+    events: "coffeemek.events.production_status"
+    production_completion: "mokametrics.production.lotto_completato"
+
+# API Configuration
+api:
+  endpoint_url: "https://mokametrics-api-fafshjgtf4degege.italynorth-01.azurewebsites.net"
+  api_key: ""  # Set via MOKAMETRICS_API_KEY environment variable
+  enable_api: false  # Set via ENABLE_API environment variable
+
+# Health Check Configuration
+health_check:
+  port: 8083
+
+# Factory Configuration
+factory:
+  location_codes:
+    Italy: "IT"
+    Brazil: "BR"
+    Vietnam: "VN"
+
+# Machine Configuration by Location
+machines:
+  Italy:
+    cnc_milling: 3
+    lathe: 2
+    assembly_line: 1
+    test_line: 1
+  Brazil:
+    cnc_milling: 2
+    lathe: 3
+    assembly_line: 2
+    test_line: 1
+  Vietnam:
+    cnc_milling: 4
+    lathe: 3
+    assembly_line: 2
+    test_line: 2
+
+# Processing Time Configuration (in seconds)
+processing_times:
+  cnc_milling:
+    min: 1200  # 20 minutes
+    max: 3600  # 60 minutes
+  lathe:
+    min: 900   # 15 minutes
+    max: 2700  # 45 minutes
+  assembly:
+    min: 1800  # 30 minutes
+    max: 5400  # 90 minutes
+  test:
+    min: 600   # 10 minutes
+    max: 1800  # 30 minutes
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Simulation Parameters
+simulation:
+  status_report_interval: 60  # seconds
+  machine_block_probability: 0.05  # 5% chance of machine blocking
+  priority_processing: true  # Process high priority lots first
