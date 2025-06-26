@@ -36,6 +36,7 @@ class ProductionLot:
 
     # Track production progress
     pieces_produced: int = 0  # How many pieces have been completed so far
+    pieces_in_production: Dict[str, 'ProductionPiece'] = field(default_factory=dict)  # piece_id -> piece
 
     # Track timing for each stage
     cnc_start: Optional[datetime] = None
@@ -62,8 +63,97 @@ class ProductionLot:
         """Get how many pieces still need to be produced"""
         return max(0, self.quantity - self.pieces_produced)
 
+    def create_pieces(self) -> List['ProductionPiece']:
+        """Create individual pieces for this lot"""
+        pieces = []
+        for piece_num in range(1, self.quantity + 1):
+            piece_id = f"{self.lot_code}_P{piece_num:03d}"
+            piece = ProductionPiece(
+                piece_id=piece_id,
+                lot_code=self.lot_code,
+                piece_number=piece_num,
+                customer=self.customer,
+                location=self.location,
+                priority=self.priority
+            )
+            pieces.append(piece)
+            self.pieces_in_production[piece_id] = piece
+        return pieces
+
+    def get_pieces_in_stage(self, stage: ProductionStage) -> List['ProductionPiece']:
+        """Get all pieces currently in a specific stage"""
+        return [piece for piece in self.pieces_in_production.values()
+                if piece.current_stage == stage]
+
+    def get_completed_pieces(self) -> List['ProductionPiece']:
+        """Get all pieces that have completed production"""
+        return [piece for piece in self.pieces_in_production.values()
+                if piece.is_completed()]
+
+    def is_lot_complete(self) -> bool:
+        """Check if all pieces in the lot have completed production"""
+        return len(self.get_completed_pieces()) == self.quantity
+
+    def get_lot_progress(self) -> Dict[str, int]:
+        """Get count of pieces in each stage"""
+        progress = {stage.value: 0 for stage in ProductionStage}
+        for piece in self.pieces_in_production.values():
+            progress[piece.current_stage.value] += 1
+        return progress
+
     def get_total_cycle_time(self) -> float:
         """Get total cycle time in minutes"""
+        if self.created_at and self.test_end:
+            return (self.test_end - self.created_at).total_seconds() / 60
+        return 0.0
+
+
+@dataclass
+class ProductionPiece:
+    """Individual piece moving through the production pipeline"""
+    piece_id: str  # Unique identifier for this piece (lot_code + piece_number)
+    lot_code: str  # Parent lot identifier
+    piece_number: int  # Piece number within the lot (1, 2, 3, ...)
+    customer: str  # Customer name (inherited from lot)
+    location: str  # Production location (inherited from lot)
+    priority: str = "normal"  # Priority (inherited from lot)
+
+    # Current state
+    current_stage: ProductionStage = ProductionStage.QUEUED
+    current_machine: Optional[str] = None
+    stage_start_time: Optional[datetime] = None
+    created_at: datetime = field(default_factory=datetime.now)
+
+    # Track timing for each stage
+    cnc_start: Optional[datetime] = None
+    cnc_end: Optional[datetime] = None
+    lathe_start: Optional[datetime] = None
+    lathe_end: Optional[datetime] = None
+    assembly_start: Optional[datetime] = None
+    assembly_end: Optional[datetime] = None
+    test_start: Optional[datetime] = None
+    test_end: Optional[datetime] = None
+
+    def is_completed(self) -> bool:
+        """Check if this piece has completed all production stages"""
+        return self.current_stage == ProductionStage.COMPLETED
+
+    def get_stage_duration(self, stage: ProductionStage) -> float:
+        """Get duration in minutes for a specific stage"""
+        stage_times = {
+            ProductionStage.CNC_MILLING: (self.cnc_start, self.cnc_end),
+            ProductionStage.LATHE: (self.lathe_start, self.lathe_end),
+            ProductionStage.ASSEMBLY: (self.assembly_start, self.assembly_end),
+            ProductionStage.TEST: (self.test_start, self.test_end)
+        }
+
+        start_time, end_time = stage_times.get(stage, (None, None))
+        if start_time and end_time:
+            return (end_time - start_time).total_seconds() / 60
+        return 0.0
+
+    def get_total_cycle_time(self) -> float:
+        """Get total cycle time in minutes for this piece"""
         if self.created_at and self.test_end:
             return (self.test_end - self.created_at).total_seconds() / 60
         return 0.0
@@ -87,7 +177,8 @@ class Machine:
     machine_type: str
     location: str
     is_busy: bool = False
-    current_lot: Optional[str] = None
+    current_piece: Optional[str] = None  # piece_id instead of lot_code
+    current_lot: Optional[str] = None    # Keep for compatibility and tracking
     busy_since: Optional[datetime] = None
     expected_completion: Optional[datetime] = None
     in_maintenance: bool = False
@@ -95,36 +186,43 @@ class Machine:
     maintenance_started: Optional[datetime] = None
 
 class ProductionQueue:
-    """FIFO queue for each production stage"""
-    
+    """FIFO queue for each production stage - now handles individual pieces"""
+
     def __init__(self, stage: ProductionStage):
         self.stage = stage
-        self.queue: deque[ProductionLot] = deque()
-        self.high_priority_queue: deque[ProductionLot] = deque()
-    
-    def add(self, lot: ProductionLot):
-        """Add lot to queue based on priority"""
-        if lot.priority == "high":
-            self.high_priority_queue.append(lot)
+        self.queue: deque[ProductionPiece] = deque()
+        self.high_priority_queue: deque[ProductionPiece] = deque()
+
+    def add(self, piece: ProductionPiece):
+        """Add piece to queue based on priority"""
+        if piece.priority == "high":
+            self.high_priority_queue.append(piece)
         else:
-            self.queue.append(lot)
-        logger.debug(f"Added lot {lot.lot_code} to {self.stage.value} queue")
-    
-    def get_next(self) -> Optional[ProductionLot]:
-        """Get next lot from queue (high priority first)"""
+            self.queue.append(piece)
+        logger.debug(f"Added piece {piece.piece_id} to {self.stage.value} queue")
+
+    def get_next(self) -> Optional[ProductionPiece]:
+        """Get next piece from queue (high priority first)"""
         if self.high_priority_queue:
             return self.high_priority_queue.popleft()
         elif self.queue:
             return self.queue.popleft()
         return None
-    
+
     def size(self) -> int:
         """Get total queue size"""
         return len(self.queue) + len(self.high_priority_queue)
-    
-    def get_lots(self) -> List[ProductionLot]:
-        """Get all lots in queue"""
+
+    def get_pieces(self) -> List[ProductionPiece]:
+        """Get all pieces in queue"""
         return list(self.high_priority_queue) + list(self.queue)
+
+    def get_lots_in_queue(self) -> Set[str]:
+        """Get unique lot codes that have pieces in this queue"""
+        lot_codes = set()
+        for piece in self.get_pieces():
+            lot_codes.add(piece.lot_code)
+        return lot_codes
 
 class MachinePool:
     """Manages available machines for each type and location"""
@@ -151,8 +249,20 @@ class MachinePool:
                 return machine
         return None
     
+    def assign_piece(self, machine: Machine, piece: ProductionPiece, processing_time: int):
+        """Assign a piece to a machine"""
+        machine.is_busy = True
+        machine.current_piece = piece.piece_id
+        machine.current_lot = piece.lot_code  # Keep for compatibility
+        machine.busy_since = datetime.now()
+        machine.expected_completion = datetime.now() + timedelta(seconds=processing_time)
+        piece.current_machine = machine.machine_id
+        piece.stage_start_time = machine.busy_since
+        logger.info(f"Assigned piece {piece.piece_id} (lot {piece.lot_code}) to machine {machine.machine_id}")
+
     def assign_lot(self, machine: Machine, lot: ProductionLot, processing_time: int):
-        """Assign a lot to a machine"""
+        """Legacy method - kept for compatibility"""
+        # This method is deprecated but kept for any remaining legacy code
         machine.is_busy = True
         machine.current_lot = lot.lot_code
         machine.busy_since = datetime.now()
@@ -166,6 +276,7 @@ class MachinePool:
         machine = self.all_machines.get(machine_id)
         if machine:
             machine.is_busy = False
+            machine.current_piece = None
             machine.current_lot = None
             machine.busy_since = None
             machine.expected_completion = None
@@ -309,16 +420,25 @@ class ProductionCoordinator:
             location=lot_data["location"],
             priority=priority
         )
-        
+
+        # Create individual pieces for this lot
+        pieces = lot.create_pieces()
+
+        # Add lot to tracking
         self.lots[lot.lot_code] = lot
-        self.queues[ProductionStage.QUEUED].add(lot)
+
+        # Add each piece to the initial queue
+        for piece in pieces:
+            self.queues[ProductionStage.QUEUED].add(piece)
+
+        logger.info(f"Created {len(pieces)} pieces for lot {lot.lot_code}")
 
         # Update monitoring
         monitor.update_lot_status(
             lot.lot_code, lot.customer, lot.quantity,
             lot.location, "queued", lot.created_at
         )
-        monitor.update_queue_status("queued", len(self.queues[ProductionStage.QUEUED].queue))
+        monitor.update_queue_status("queued", self.queues[ProductionStage.QUEUED].size())
 
         # Send event
         await self._send_event("lot.received", {
@@ -332,53 +452,44 @@ class ProductionCoordinator:
         logger.info(f"Added lot {lot.lot_code} to production queue")
     
     async def process_queues(self):
-        """Main processing loop - check queues and assign lots to machines"""
+        """Main processing loop - check queues and assign pieces to machines"""
         while self.running:
             try:
                 # Process each stage queue
                 for stage in [ProductionStage.QUEUED, ProductionStage.CNC_MILLING,
                              ProductionStage.LATHE, ProductionStage.ASSEMBLY, ProductionStage.TEST]:
-                    
+
                     queue = self.queues[stage]
                     if queue.size() == 0:
                         continue
-                    
-                    # Add debug logging for assembly queue specifically
-                    if stage == ProductionStage.ASSEMBLY:
-                        logger.info(f"Processing ASSEMBLY queue: {queue.size()} lots waiting")
-                        for lot in queue.get_lots():
-                            logger.info(f"  - Lot {lot.lot_code} in assembly queue, current_stage: {lot.current_stage}")
-                    
+
+                    # Debug logging for queue status
+                    if queue.size() > 0:
+                        lot_codes = queue.get_lots_in_queue()
+                        logger.debug(f"Processing {stage.value} queue: {queue.size()} pieces from {len(lot_codes)} lots")
+
                     # Get machine type for this stage
                     machine_type = self.stage_to_machine.get(stage)
                     if not machine_type:
                         continue
-                    
-                    # Add debug logging for assembly machine availability
-                    if stage == ProductionStage.ASSEMBLY:
-                        available_machines = [m for m in self.machine_pool.machines.get(machine_type, []) 
-                                            if not m.is_busy and not m.in_maintenance]
-                        logger.info(f"Available {machine_type} machines: {len(available_machines)}")
-                        for m in available_machines:
-                            logger.info(f"  - Machine {m.machine_id}, location: {m.location}")
-                    
-                    # Try to assign lots to available machines
-                    lots_to_process = list(queue.get_lots())  # Make a copy to avoid modification during iteration
-                    for lot in lots_to_process:
+
+                    # Try to assign pieces to available machines
+                    pieces_to_process = list(queue.get_pieces())  # Make a copy to avoid modification during iteration
+                    for piece in pieces_to_process:
                         machine = self.machine_pool.get_available_machine(
-                            machine_type, lot.location
+                            machine_type, piece.location
                         )
-                        
+
                         if machine:
                             # Remove from queue using the queue's get_next method
-                            removed_lot = queue.get_next()
-                            if removed_lot and removed_lot.lot_code == lot.lot_code:
+                            removed_piece = queue.get_next()
+                            if removed_piece and removed_piece.piece_id == piece.piece_id:
                                 # Start processing
-                                await self._start_processing(lot, machine, stage)
+                                await self._start_processing_piece(piece, machine, stage)
                             else:
-                                # Put it back if we got a different lot
-                                if removed_lot:
-                                    queue.add(removed_lot)
+                                # Put it back if we got a different piece
+                                if removed_piece:
+                                    queue.add(removed_piece)
                 
                 # Check for completed processing
                 await self._check_completed_machines()
@@ -439,20 +550,76 @@ class ProductionCoordinator:
         })
         
         logger.info(f"Started processing lot {lot.lot_code} on {machine.machine_id}")
-    
+
+    async def _start_processing_piece(self, piece: ProductionPiece, machine: Machine, current_stage: ProductionStage):
+        """Start processing a piece on a machine"""
+        # Calculate processing time
+        processing_time = random.randint(*self.processing_times[machine.machine_type])
+
+        logger.info(f"Starting processing for piece {piece.piece_id} (lot {piece.lot_code}) on machine {machine.machine_id}, from queue stage: {current_stage.value}")
+
+        # Assign piece to machine
+        self.machine_pool.assign_piece(machine, piece, processing_time)
+
+        # Update piece stage to the processing stage (not the next queue stage)
+        processing_stage = self._get_processing_stage(current_stage)
+        piece.current_stage = processing_stage
+
+        logger.info(f"Piece {piece.piece_id} moved from {current_stage.value} to processing stage: {processing_stage.value}")
+
+        # Update monitoring
+        monitor.update_machine_status(
+            machine.machine_id, machine.machine_type, machine.location,
+            True, piece.lot_code
+        )
+
+        # Update piece timing
+        now = datetime.now()
+        if processing_stage == ProductionStage.CNC_MILLING:
+            piece.cnc_start = now
+        elif processing_stage == ProductionStage.LATHE:
+            piece.lathe_start = now
+        elif processing_stage == ProductionStage.ASSEMBLY:
+            piece.assembly_start = now
+        elif processing_stage == ProductionStage.TEST:
+            piece.test_start = now
+
+        # Send telemetry data for machine starting
+        await self._send_piece_telemetry(piece, machine, "started")
+
+        # Send event
+        await self._send_event(f"{machine.machine_type}.started", {
+            "lot_code": piece.lot_code,
+            "piece_id": piece.piece_id,
+            "machine_id": machine.machine_id,
+            "processing_time_seconds": processing_time,
+            "timestamp": now.isoformat()
+        })
+
+        logger.info(f"Started processing piece {piece.piece_id} on {machine.machine_id}")
+
     async def _check_completed_machines(self):
         """Check for machines that have completed processing"""
         now = datetime.now()
-        
+
         for machine in self.machine_pool.all_machines.values():
             if machine.is_busy and machine.expected_completion and now >= machine.expected_completion:
-                # Find the lot
-                lot = self.lots.get(machine.current_lot)
-                if not lot:
-                    continue
-                
-                # Complete processing
-                await self._complete_processing(lot, machine)
+                # Find the piece being processed
+                piece = None
+                if machine.current_piece:
+                    # Find the piece in the lot's pieces
+                    lot = self.lots.get(machine.current_lot)
+                    if lot and machine.current_piece in lot.pieces_in_production:
+                        piece = lot.pieces_in_production[machine.current_piece]
+
+                if piece:
+                    # Complete processing for the piece
+                    await self._complete_processing_piece(piece, machine)
+                elif machine.current_lot:
+                    # Fallback to legacy lot processing if no piece found
+                    lot = self.lots.get(machine.current_lot)
+                    if lot:
+                        await self._complete_processing(lot, machine)
     
     async def _complete_processing(self, lot: ProductionLot, machine: Machine):
         """Complete processing for a lot on a machine"""
@@ -550,6 +717,102 @@ class ProductionCoordinator:
             logger.info(f"Added lot {lot.lot_code} to {next_stage.value} queue")
         
         logger.info(f"Completed processing lot {lot.lot_code} on {machine.machine_id}")
+
+    async def _complete_processing_piece(self, piece: ProductionPiece, machine: Machine):
+        """Complete processing for a piece on a machine"""
+        now = datetime.now()
+
+        logger.info(f"Completing processing for piece {piece.piece_id} (lot {piece.lot_code}) on machine {machine.machine_id}, current stage: {piece.current_stage}")
+
+        # Update piece timing
+        if piece.current_stage == ProductionStage.CNC_MILLING:
+            piece.cnc_end = now
+        elif piece.current_stage == ProductionStage.LATHE:
+            piece.lathe_end = now
+        elif piece.current_stage == ProductionStage.ASSEMBLY:
+            piece.assembly_end = now
+        elif piece.current_stage == ProductionStage.TEST:
+            piece.test_end = now
+
+        # Send final telemetry for this stage
+        await self._send_piece_telemetry(piece, machine, "completed")
+
+        # Send event
+        await self._send_event(f"{machine.machine_type}.completed", {
+            "lot_code": piece.lot_code,
+            "piece_id": piece.piece_id,
+            "machine_id": machine.machine_id,
+            "timestamp": now.isoformat()
+        })
+
+        # Update monitoring for machine becoming free
+        monitor.update_machine_status(
+            machine.machine_id, machine.machine_type, machine.location,
+            False, None
+        )
+
+        # Free the machine
+        self.machine_pool.free_machine(machine.machine_id)
+
+        # Move piece to next stage
+        next_stage = self._get_next_production_stage(piece.current_stage)
+
+        logger.info(f"Piece {piece.piece_id} completed {piece.current_stage.value}, moving to: {next_stage.value}")
+
+        if next_stage == ProductionStage.COMPLETED:
+            # Piece has completed all stages
+            piece.current_stage = ProductionStage.COMPLETED
+
+            # Check if entire lot is complete
+            lot = self.lots.get(piece.lot_code)
+            if lot and lot.is_lot_complete():
+                # All pieces in lot are complete
+                await self._complete_lot(lot)
+        else:
+            # Move piece to next stage queue
+            piece.current_stage = next_stage
+            self.queues[next_stage].add(piece)
+            logger.info(f"Added piece {piece.piece_id} to {next_stage.value} queue")
+
+        logger.info(f"Completed processing piece {piece.piece_id} on {machine.machine_id}")
+
+    async def _complete_lot(self, lot: ProductionLot):
+        """Complete an entire lot when all pieces are finished"""
+        now = datetime.now()
+
+        logger.info(f"Lot {lot.lot_code} completed - all {lot.quantity} pieces finished")
+
+        # Send end-of-cycle data
+        await self._send_end_of_cycle_data(lot)
+
+        # Update monitoring for completed lot
+        monitor.update_lot_status(
+            lot.lot_code, lot.customer, lot.quantity,
+            lot.location, "completed"
+        )
+        monitor.complete_lot(lot.lot_code)
+
+        await self._send_event("lot.completed", {
+            "lot_code": lot.lot_code,
+            "total_time_minutes": (now - lot.created_at).total_seconds() / 60,
+            "timestamp": now.isoformat()
+        })
+
+        # Remove from active lots
+        del self.lots[lot.lot_code]
+
+    async def _send_piece_telemetry(self, piece: ProductionPiece, machine: Machine, status: str):
+        """Send machine telemetry data for piece processing"""
+        # This delegates to the existing machine telemetry system
+        # We create a temporary lot-like object for compatibility
+        temp_lot = type('TempLot', (), {
+            'lot_code': piece.lot_code,
+            'customer': piece.customer,
+            'quantity': 1,  # Single piece
+            'location': piece.location
+        })()
+
+        await self._send_machine_telemetry(temp_lot, machine, status)
 
     def _get_pieces_per_cycle(self, machine_type: str) -> int:
         """Get how many pieces a machine type produces per processing cycle"""
@@ -735,18 +998,24 @@ class ProductionCoordinator:
     
     def get_status(self) -> Dict[str, Any]:
         """Get current production status"""
+        # Calculate total pieces in production
+        total_pieces = sum(len(lot.pieces_in_production) for lot in self.lots.values())
+
         status = {
             "active_lots": len(self.lots),
+            "total_pieces_in_production": total_pieces,
             "queues": {},
             "machines": self.machine_pool.get_machine_status()
         }
-        
+
         for stage, queue in self.queues.items():
+            lot_codes_in_queue = queue.get_lots_in_queue()
             status["queues"][stage.value] = {
-                "size": queue.size(),
-                "lots": [lot.lot_code for lot in queue.get_lots()]
+                "pieces": queue.size(),
+                "lots_represented": len(lot_codes_in_queue),
+                "lot_codes": list(lot_codes_in_queue)
             }
-        
+
         return status
 
     async def _process_single_queue_iteration(self):
