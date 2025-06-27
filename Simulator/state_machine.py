@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum, auto
 from typing import Dict, List, Optional, Set, Any
 from dataclasses import dataclass, field
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class ProductionStage(Enum):
     """Production stages"""
     QUEUED = "queued"
-    CNC_MILLING = "cnc_milling"
+    CNC = "cnc"
     LATHE = "lathe"
     ASSEMBLY = "assembly"
     TEST = "test"
@@ -141,7 +141,7 @@ class ProductionPiece:
     def get_stage_duration(self, stage: ProductionStage) -> float:
         """Get duration in minutes for a specific stage"""
         stage_times = {
-            ProductionStage.CNC_MILLING: (self.cnc_start, self.cnc_end),
+            ProductionStage.CNC: (self.cnc_start, self.cnc_end),
             ProductionStage.LATHE: (self.lathe_start, self.lathe_end),
             ProductionStage.ASSEMBLY: (self.assembly_start, self.assembly_end),
             ProductionStage.TEST: (self.test_start, self.test_end)
@@ -229,7 +229,7 @@ class MachinePool:
     
     def __init__(self):
         self.machines: Dict[str, List[Machine]] = {
-            "cnc_milling": [],
+            "cnc": [],
             "lathe": [],
             "assembly": [],
             "test": []
@@ -347,7 +347,7 @@ class ProductionCoordinator:
         # Queues for each stage
         self.queues = {
             ProductionStage.QUEUED: ProductionQueue(ProductionStage.QUEUED),
-            ProductionStage.CNC_MILLING: ProductionQueue(ProductionStage.CNC_MILLING),
+            ProductionStage.CNC: ProductionQueue(ProductionStage.CNC),
             ProductionStage.LATHE: ProductionQueue(ProductionStage.LATHE),
             ProductionStage.ASSEMBLY: ProductionQueue(ProductionStage.ASSEMBLY),
             ProductionStage.TEST: ProductionQueue(ProductionStage.TEST)
@@ -359,7 +359,7 @@ class ProductionCoordinator:
         
         # Processing time ranges (in seconds) for each stage - ULTRA FAST TESTING MODE
         self.processing_times = {
-            "cnc_milling": (8, 12),        # 8-12 seconds (total cycle ~40 seconds)
+            "cnc": (8, 12),        # 8-12 seconds (total cycle ~40 seconds)
             "lathe": (8, 12),           # 8-12 seconds (total cycle ~40 seconds)
             "assembly": (8, 12),     # 8-12 seconds (total cycle ~40 seconds)
             "test": (8, 12)              # 8-12 seconds (total cycle ~40 seconds)
@@ -367,8 +367,8 @@ class ProductionCoordinator:
         
         # Stage to machine type mapping
         self.stage_to_machine = {
-            ProductionStage.QUEUED: "cnc_milling",  # QUEUED lots go to first stage (CNC)
-            ProductionStage.CNC_MILLING: "cnc_milling",
+            ProductionStage.QUEUED: "cnc",  # QUEUED lots go to first stage (CNC)
+            ProductionStage.CNC: "cnc",
             ProductionStage.LATHE: "lathe",
             ProductionStage.ASSEMBLY: "assembly",
             ProductionStage.TEST: "test"
@@ -383,7 +383,7 @@ class ProductionCoordinator:
             for machine_type, count in machine_counts.items():
                 # Map config names to internal names
                 internal_type = {
-                    "cnc_milling": "cnc_milling",
+                    "cnc": "cnc",
                     "lathe": "lathe",
                     "assembly_line": "assembly",
                     "test_line": "test"
@@ -456,7 +456,7 @@ class ProductionCoordinator:
         while self.running:
             try:
                 # Process each stage queue
-                for stage in [ProductionStage.QUEUED, ProductionStage.CNC_MILLING,
+                for stage in [ProductionStage.QUEUED, ProductionStage.CNC,
                              ProductionStage.LATHE, ProductionStage.ASSEMBLY, ProductionStage.TEST]:
 
                     queue = self.queues[stage]
@@ -529,7 +529,7 @@ class ProductionCoordinator:
         
         # Update lot timing
         now = datetime.now()
-        if processing_stage == ProductionStage.CNC_MILLING:
+        if processing_stage == ProductionStage.CNC:
             lot.cnc_start = now
         elif processing_stage == ProductionStage.LATHE:
             lot.lathe_start = now
@@ -575,7 +575,7 @@ class ProductionCoordinator:
 
         # Update piece timing
         now = datetime.now()
-        if processing_stage == ProductionStage.CNC_MILLING:
+        if processing_stage == ProductionStage.CNC:
             piece.cnc_start = now
         elif processing_stage == ProductionStage.LATHE:
             piece.lathe_start = now
@@ -628,7 +628,7 @@ class ProductionCoordinator:
         logger.info(f"Completing processing for lot {lot.lot_code} on machine {machine.machine_id}, current stage: {lot.current_stage}")
         
         # Update lot timing
-        if lot.current_stage == ProductionStage.CNC_MILLING:
+        if lot.current_stage == ProductionStage.CNC:
             lot.cnc_end = now
         elif lot.current_stage == ProductionStage.LATHE:
             lot.lathe_end = now
@@ -688,8 +688,7 @@ class ProductionCoordinator:
             stage_time = (now - lot.stage_start_time).total_seconds() / 60 if lot.stage_start_time else 0
             lot.machine_times[machine.machine_id] = stage_time
 
-            # Send end-of-cycle data
-            await self._send_end_of_cycle_data(lot)
+            # NOTE: No longer sending lot-level completion data - using piece-by-piece completion
 
             # Update monitoring for completed lot
             monitor.update_lot_status(
@@ -725,7 +724,7 @@ class ProductionCoordinator:
         logger.info(f"Completing processing for piece {piece.piece_id} (lot {piece.lot_code}) on machine {machine.machine_id}, current stage: {piece.current_stage}")
 
         # Update piece timing
-        if piece.current_stage == ProductionStage.CNC_MILLING:
+        if piece.current_stage == ProductionStage.CNC:
             piece.cnc_end = now
         elif piece.current_stage == ProductionStage.LATHE:
             piece.lathe_end = now
@@ -763,11 +762,15 @@ class ProductionCoordinator:
             # Piece has completed all stages
             piece.current_stage = ProductionStage.COMPLETED
 
-            # Check if entire lot is complete
+            # Send piece completion message and update lot progress
             lot = self.lots.get(piece.lot_code)
-            if lot and lot.is_lot_complete():
-                # All pieces in lot are complete
-                await self._complete_lot(lot)
+            if lot:
+                await self._send_piece_completion_message(piece, lot)
+
+                # Check if entire lot is complete
+                if lot.is_lot_complete():
+                    # All pieces in lot are complete
+                    await self._complete_lot(lot)
         else:
             # Move piece to next stage queue
             piece.current_stage = next_stage
@@ -782,8 +785,12 @@ class ProductionCoordinator:
 
         logger.info(f"Lot {lot.lot_code} completed - all {lot.quantity} pieces finished")
 
-        # Send end-of-cycle data
-        await self._send_end_of_cycle_data(lot)
+        # Update lot status to completed (CRITICAL FIX: Don't delete the lot)
+        lot.current_stage = ProductionStage.COMPLETED
+
+        # NOTE: No longer sending lot-level completion data here since we now send
+        # piece-by-piece completion messages. The final piece completion message
+        # will have lot_produced_quantity == lot_total_quantity indicating lot completion.
 
         # Update monitoring for completed lot
         monitor.update_lot_status(
@@ -798,8 +805,70 @@ class ProductionCoordinator:
             "timestamp": now.isoformat()
         })
 
-        # Remove from active lots
-        del self.lots[lot.lot_code]
+        # Keep the lot in self.lots but mark it as completed
+        # This allows status tracking to show "completed" instead of removing it entirely
+        logger.info(f"Lot {lot.lot_code} marked as completed and retained for status tracking")
+
+
+
+    async def _send_piece_completion_message(self, piece: ProductionPiece, lot: ProductionLot):
+        """Send piece completion message when a piece finishes all 4 stages"""
+        try:
+            # Increment the lot's completed pieces counter
+            lot.pieces_produced += 1
+
+            # Calculate individual piece timing for each stage
+            cnc_duration = 0
+            lathe_duration = 0
+            assembly_duration = 0
+            test_duration = 0
+
+            if piece.cnc_start and piece.cnc_end:
+                cnc_duration = max(1, int((piece.cnc_end - piece.cnc_start).total_seconds() / 60))
+            if piece.lathe_start and piece.lathe_end:
+                lathe_duration = max(1, int((piece.lathe_end - piece.lathe_start).total_seconds() / 60))
+            if piece.assembly_start and piece.assembly_end:
+                assembly_duration = max(1, int((piece.assembly_end - piece.assembly_start).total_seconds() / 60))
+            if piece.test_start and piece.test_end:
+                test_duration = max(1, int((piece.test_end - piece.test_start).total_seconds() / 60))
+
+            logger.debug(f"Piece {piece.piece_id} durations - CNC: {cnc_duration}min, Lathe: {lathe_duration}min, Assembly: {assembly_duration}min, Test: {test_duration}min")
+
+            # Get timezone-aware timestamps
+            utc_now = datetime.now(timezone.utc)
+            local_tz = pytz.timezone(self._get_location_timezone(piece.location))
+            local_now = utc_now.astimezone(local_tz)
+
+            # Create piece completion data (updated format)
+            completion_data = {
+                "lot_code": piece.lot_code,
+                "lot_total_quantity": lot.quantity,
+                "lot_produced_quantity": lot.pieces_produced,
+                "cnc_duration": cnc_duration,
+                "lathe_duration": lathe_duration,
+                "assembly_duration": assembly_duration,
+                "test_duration": test_duration,
+                "site": piece.location,
+                "local_timestamp": local_now.isoformat(),
+                "utc_timestamp": utc_now.isoformat()
+            }
+
+            # Send to Kafka
+            await self.kafka_sender.send_piece_completion_data(completion_data)
+
+            logger.info(f"Piece {piece.piece_id} completed - lot progress: {lot.pieces_produced}/{lot.quantity}")
+
+        except Exception as e:
+            logger.error(f"Failed to send piece completion message for piece {piece.piece_id}: {e}")
+
+    def _get_location_timezone(self, location: str) -> str:
+        """Get timezone string for a location"""
+        timezone_map = {
+            "Italy": "Europe/Rome",
+            "Brazil": "America/Sao_Paulo",
+            "Vietnam": "Asia/Ho_Chi_Minh"
+        }
+        return timezone_map.get(location, "Europe/Rome")  # Default to Italy timezone
 
     async def _send_piece_telemetry(self, piece: ProductionPiece, machine: Machine, status: str):
         """Send machine telemetry data for piece processing"""
@@ -818,7 +887,7 @@ class ProductionCoordinator:
         """Get how many pieces a machine type produces per processing cycle"""
         # Different machine types produce different amounts per cycle
         pieces_per_cycle = {
-            "cnc_milling": random.randint(1, 5),    # CNC produces 1-5 pieces per cycle
+            "cnc": random.randint(1, 5),    # CNC produces 1-5 pieces per cycle
             "lathe": random.randint(1, 3),          # Lathe produces 1-3 pieces per cycle
             "assembly": random.randint(5, 15),      # Assembly line produces more pieces
             "test": random.randint(1, 8)            # Test line processes multiple pieces
@@ -858,58 +927,7 @@ class ProductionCoordinator:
             telemetry_data = simulator.generate_measurement_data()
             await self.kafka_sender.send_telemetry_data(telemetry_data, machine.machine_type)
 
-    async def _send_end_of_cycle_data(self, lot: ProductionLot):
-        """Send production completion data for the completed lot"""
-        from .models import ProductionCompletionData, Location
-
-        # Get timestamps
-        utc_now = datetime.now(pytz.UTC)
-
-        # Map location string to Location enum
-        location_map = {
-            "Italy": Location.ITALY,
-            "Brazil": Location.BRAZIL,
-            "Vietnam": Location.VIETNAM
-        }
-
-        location_enum = location_map.get(lot.location, Location.ITALY)
-        local_tz = pytz.timezone(location_enum.value[1])
-        local_now = utc_now.astimezone(local_tz)
-
-        # Map location to site name
-        site_mapping = {
-            "Italy": "Italy",
-            "Brazil": "Brazil",
-            "Vietnam": "Vietnam"
-        }
-        site = site_mapping.get(lot.location, "Italy")
-
-        # Calculate stage durations in minutes
-        cnc_duration = int(lot.get_stage_time("cnc"))
-        lathe_duration = int(lot.get_stage_time("lathe"))
-        assembly_duration = int(lot.get_stage_time("assembly"))
-        test_duration = int(lot.get_stage_time("test"))
-        total_duration_minutes = cnc_duration + lathe_duration + assembly_duration + test_duration
-
-        production_completion_data = ProductionCompletionData(
-            lot_code=lot.lot_code,
-            customer=lot.customer,
-            quantity=lot.quantity,
-            site=site,
-            local_timestamp=local_now.isoformat(),
-            completion_timestamp=utc_now.isoformat(),
-            total_duration_minutes=total_duration_minutes,
-            cnc_duration=cnc_duration,
-            lathe_duration=lathe_duration,
-            assembly_duration=assembly_duration,
-            test_duration=test_duration,
-            result="COMPLETED"  # Assuming all lots complete successfully for now
-        )
-
-        # Convert to dict and send
-        from dataclasses import asdict
-        completion_data = asdict(production_completion_data)
-        await self.kafka_sender.send_production_completion_data(completion_data)
+    # NOTE: _send_end_of_cycle_data method removed - replaced with piece-by-piece completion messaging
     
     async def _send_event(self, event_type: str, data: Dict[str, Any]):
         """Send production event to Kafka"""
@@ -929,8 +947,8 @@ class ProductionCoordinator:
     def _get_next_stage(self, current_stage: ProductionStage) -> ProductionStage:
         """Get the next processing stage (for starting)"""
         transitions = {
-            ProductionStage.QUEUED: ProductionStage.CNC_MILLING,
-            ProductionStage.CNC_MILLING: ProductionStage.LATHE,
+            ProductionStage.QUEUED: ProductionStage.CNC,
+            ProductionStage.CNC: ProductionStage.LATHE,
             ProductionStage.LATHE: ProductionStage.ASSEMBLY,
             ProductionStage.ASSEMBLY: ProductionStage.TEST
         }
@@ -939,8 +957,8 @@ class ProductionCoordinator:
     def _get_processing_stage(self, queue_stage: ProductionStage) -> ProductionStage:
         """Get the processing stage for a given queue stage"""
         transitions = {
-            ProductionStage.QUEUED: ProductionStage.CNC_MILLING,
-            ProductionStage.CNC_MILLING: ProductionStage.CNC_MILLING,
+            ProductionStage.QUEUED: ProductionStage.CNC,
+            ProductionStage.CNC: ProductionStage.CNC,
             ProductionStage.LATHE: ProductionStage.LATHE,
             ProductionStage.ASSEMBLY: ProductionStage.ASSEMBLY,
             ProductionStage.TEST: ProductionStage.TEST
@@ -950,7 +968,7 @@ class ProductionCoordinator:
     def _get_next_production_stage(self, current_stage: ProductionStage) -> ProductionStage:
         """Get the next queue stage (after completion)"""
         transitions = {
-            ProductionStage.CNC_MILLING: ProductionStage.LATHE,
+            ProductionStage.CNC: ProductionStage.LATHE,
             ProductionStage.LATHE: ProductionStage.ASSEMBLY,
             ProductionStage.ASSEMBLY: ProductionStage.TEST,
             ProductionStage.TEST: ProductionStage.COMPLETED
@@ -1022,7 +1040,7 @@ class ProductionCoordinator:
         """Process queues for a single iteration (used for manual triggering)"""
         try:
             # Process each stage queue
-            for stage in [ProductionStage.QUEUED, ProductionStage.CNC_MILLING,
+            for stage in [ProductionStage.QUEUED, ProductionStage.CNC,
                          ProductionStage.LATHE, ProductionStage.ASSEMBLY, ProductionStage.TEST]:
                 
                 queue = self.queues[stage]

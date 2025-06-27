@@ -24,7 +24,7 @@ class KafkaDataSender:
         self.kafka_producer = None
         self.kafka_consumer = None
         self.http_session = None
-        self.kafka_broker = "165.227.168.240:9093"
+        self.kafka_broker = "165.227.168.240:29093"
         self.api_endpoint = "https://mokametrics-api-fafshjgtf4degege.italynorth-01.azurewebsites.net"
         self.lot_callback = None  # Callback for new lots
         
@@ -45,10 +45,10 @@ class KafkaDataSender:
             logger.error(f"Failed to start Kafka producer: {e}")
             raise
         
-        # Initialize Kafka consumer for incoming lots
+        # Initialize Kafka consumer for incoming orders
         try:
             self.kafka_consumer = AIOKafkaConsumer(
-                'coffeemek.orders.new_lots',
+                'mokametrics.order',
                 bootstrap_servers=self.kafka_broker,
                 group_id='coffeemek-simulator',
                 value_deserializer=lambda m: json.loads(m.decode('utf-8')),
@@ -56,7 +56,7 @@ class KafkaDataSender:
                 enable_auto_commit=True
             )
             await self.kafka_consumer.start()
-            logger.info("Kafka consumer started for incoming lots")
+            logger.info("Kafka consumer started for incoming orders")
         except Exception as e:
             logger.error(f"Failed to start Kafka consumer: {e}")
             # Consumer is optional, continue without it
@@ -84,28 +84,120 @@ class KafkaDataSender:
         self.lot_callback = callback
     
     async def consume_lots(self):
-        """Consume incoming lot messages"""
+        """Consume incoming order messages and create lots"""
         if not self.kafka_consumer:
-            logger.warning("Kafka consumer not initialized, cannot consume lots")
+            logger.warning("Kafka consumer not initialized, cannot consume orders")
             return
-            
-        logger.info("Starting to consume lots from Kafka")
-        
+
+        logger.info("Starting to consume orders from Kafka")
+
         try:
             async for msg in self.kafka_consumer:
                 try:
-                    lot_data = msg.value
-                    logger.info(f"Received new lot: {lot_data.get('codice_lotto', 'unknown')}")
-                    
-                    # Call the callback if set
-                    if self.lot_callback:
-                        await self.lot_callback(lot_data)
-                    
+                    order_data = msg.value
+                    # Support both new and old customer field formats
+                    customer_info = order_data.get('Customer') or order_data.get('CustomerId', 'unknown')
+                    logger.info(f"Received new order for customer {customer_info}")
+
+                    # Process the order and create lots
+                    await self._process_order(order_data)
+
                 except Exception as e:
-                    logger.error(f"Error processing lot message: {e}")
-                    
+                    logger.error(f"Error processing order message: {e}")
+
         except Exception as e:
             logger.error(f"Error in consume_lots: {e}")
+
+    async def _process_order(self, order_data: Dict[str, Any]):
+        """Process an order and create individual lots"""
+        try:
+            # Map IndustrialFacilityId to location names (for backward compatibility)
+            facility_id_to_location = {
+                1: "Italy",
+                2: "Brazil",
+                3: "Vietnam"
+            }
+
+            # Map location names to facility IDs (for new format)
+            location_to_facility_id = {
+                "Italy": 1,
+                "Brazil": 2,
+                "Vietnam": 3
+            }
+
+            # Support both old and new message formats
+            # New format: Customer (string), old format: CustomerId (int)
+            customer = order_data.get("Customer")
+            customer_id = order_data.get("CustomerId")
+
+            # Use Customer field if available, otherwise fall back to CustomerId
+            if customer:
+                customer_name = customer
+                # Extract or generate customer ID for internal use
+                customer_id_for_internal = customer_id if customer_id else hash(customer) % 10000
+            else:
+                # Backward compatibility: use CustomerId
+                customer_name = f"Customer_{customer_id}" if customer_id else "Unknown_Customer"
+                customer_id_for_internal = customer_id
+
+            order_date = order_data.get("OrderDate")
+            deadline = order_data.get("Deadline")
+            lots = order_data.get("Lots", [])
+
+            logger.info(f"Processing order with {len(lots)} lots for customer {customer_name}")
+
+            for lot_info in lots:
+                # Extract lot information
+                lot_code = lot_info.get("LotCode")
+                total_quantity = lot_info.get("TotalQuantity")
+                start_date = lot_info.get("StartDate")
+
+                # Support both old and new facility formats
+                # New format: IndustrialFacility (string), old format: IndustrialFacilityId (int)
+                facility_name = lot_info.get("IndustrialFacility")
+                facility_id = lot_info.get("IndustrialFacilityId")
+
+                if facility_name:
+                    # New format: use facility name directly
+                    location = facility_name
+                    # Map to facility ID for internal use
+                    facility_id_for_internal = location_to_facility_id.get(facility_name, 1)  # Default to Italy
+                elif facility_id:
+                    # Old format: map facility ID to location name
+                    location = facility_id_to_location.get(facility_id, "Italy")  # Default to Italy if unknown
+                    facility_id_for_internal = facility_id
+                else:
+                    # Default values if neither is provided
+                    location = "Italy"
+                    facility_id_for_internal = 1
+
+                # Create lot data in the format expected by the production coordinator
+                lot_data = {
+                    "lot_code": lot_code,
+                    "codice_lotto": lot_code,  # Keep for backward compatibility
+                    "customer": customer_name,
+                    "cliente": customer_name,  # Keep for backward compatibility
+                    "quantity": total_quantity,
+                    "quantita": total_quantity,  # Keep for backward compatibility
+                    "location": location,
+                    "priority": "normal",  # Default priority
+                    "priorita": "normal",  # Keep for backward compatibility
+                    "order_date": order_date,
+                    "deadline": deadline,
+                    "start_date": start_date,
+                    "facility_id": facility_id_for_internal,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+
+                logger.info(f"Creating lot {lot_code} with {total_quantity} pieces at {location}")
+
+                # Call the callback if set
+                if self.lot_callback:
+                    await self.lot_callback(lot_data)
+
+        except Exception as e:
+            logger.error(f"Error processing order: {e}")
+            raise
     
     async def send_to_kafka(self, data: Dict[str, Any]) -> bool:
         """Send data to Kafka topic"""
@@ -177,15 +269,15 @@ class KafkaDataSender:
             logger.error(f"Failed to send telemetry data: {e}")
             return False
 
-    async def send_production_completion_data(self, data: Dict[str, Any]) -> bool:
-        """Send production completion data to the lotto_completato topic"""
+    async def send_piece_completion_data(self, data: Dict[str, Any]) -> bool:
+        """Send piece completion data to the lot_completion topic (sent for each completed piece)"""
         if not self.kafka_producer:
             logger.error("Kafka producer not initialized")
             return False
 
         try:
-            # Single topic for all production completions
-            topic = "mokametrics.production.lotto_completato"
+            # Correct topic for piece-by-piece completion tracking
+            topic = "mokametrics.production.lot_completion"
 
             # Use lot code as key for partitioning (as per specification)
             key = data.get("lot_code", None)
@@ -197,16 +289,18 @@ class KafkaDataSender:
                 value=data
             )
 
-            logger.info(f"Sent production completion data to topic '{topic}': {key}")
+            logger.info(f"Sent piece completion data to topic '{topic}': {key} (piece {data.get('lot_produced_quantity', '?')}/{data.get('lot_total_quantity', '?')})")
             monitor.record_message_sent(topic, key)
             return True
 
         except KafkaError as e:
-            logger.error(f"Kafka production completion error: {e}")
+            logger.error(f"Kafka piece completion error: {e}")
             return False
         except Exception as e:
-            logger.error(f"Failed to send production completion data: {e}")
+            logger.error(f"Failed to send piece completion data: {e}")
             return False
+
+
     
     async def send_to_api(self, data: Dict[str, Any]) -> bool:
         """Send data to MokaMetrics API endpoint"""
@@ -288,7 +382,7 @@ class HealthCheckServer:
             "status": "healthy",
             "timestamp": datetime.utcnow().isoformat(),
             "uptime_seconds": (datetime.utcnow() - self.start_time).total_seconds(),
-            "kafka_broker": "165.227.168.240:9093"
+            "kafka_broker": "165.227.168.240:29093"
         })
     
     async def readiness_check(self, request):

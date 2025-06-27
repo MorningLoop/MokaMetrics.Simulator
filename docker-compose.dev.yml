@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  mokametrics-simulator:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: mokametrics-simulator-dev
+    restart: "no"  # Don't auto-restart in development
+    ports:
+      - "8083:8083"  # Health check port
+      - "8081:8081"  # Optional: Web interface port
+    environment:
+      # Kafka Configuration
+      - KAFKA_BROKER=165.227.168.240:29093
+      
+      # API Configuration (disabled by default in dev)
+      - MOKAMETRICS_API_KEY=${MOKAMETRICS_API_KEY:-}
+      - ENABLE_API=${ENABLE_API:-false}
+      
+      # Health Check Configuration
+      - HEALTH_CHECK_PORT=8083
+      
+      # Development logging
+      - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
+      
+      # Development flags
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      
+    volumes:
+      # Mount source code for development (live reload)
+      - ./Simulator:/app/Simulator
+      - ./config.yaml:/app/config.yaml
+      - ./*.py:/app/
+      
+      # Mount logs directory
+      - ./logs:/app/logs
+      
+    networks:
+      - mokametrics-dev-network
+      
+    # Development resource limits (more generous)
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+    
+    # Relaxed health check for development
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    
+    # Development: show all logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+  # Optional: Kafka UI for development
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui-dev
+    restart: "no"
+    ports:
+      - "8080:8080"
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=mokametrics
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=165.227.168.240:29093
+    networks:
+      - mokametrics-dev-network
+    profiles:
+      - kafka-ui  # Only start with: docker-compose --profile kafka-ui up
+
+networks:
+  mokametrics-dev-network:
+    driver: bridge

@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  mokametrics-simulator:
+    build: .
+    container_name: mokametrics-simulator-prod
+    restart: always
+    ports:
+      - "8083:8083"  # Health check port
+    environment:
+      # Kafka Configuration
+      - KAFKA_BROKER=165.227.168.240:29093
+      
+      # API Configuration
+      - MOKAMETRICS_API_KEY=${MOKAMETRICS_API_KEY}
+      - ENABLE_API=${ENABLE_API:-true}
+      
+      # Health Check Configuration
+      - HEALTH_CHECK_PORT=8083
+      
+      # Logging Configuration
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      
+      # Production optimizations
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      
+    volumes:
+      # Mount config file for easy updates
+      - ./config.yaml:/app/config.yaml:ro
+      
+      # Mount logs directory with proper permissions
+      - ./logs:/app/logs
+      
+    networks:
+      - mokametrics-network
+      
+    # Production resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+    
+    # Enhanced health check for production
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    
+    # Production logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+        
+    # Security: run as non-root user
+    user: "1000:1000"
+
+networks:
+  mokametrics-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

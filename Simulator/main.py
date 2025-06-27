@@ -81,8 +81,8 @@ class CoffeeMekSimulator:
         
         logger.info("All components started successfully")
         logger.info(f"Kafka broker: {self.kafka_sender.kafka_broker}")
-        logger.info(f"Consuming lots from: coffeemek.orders.new_lots")
-        logger.info(f"Sending telemetry to: coffeemek.telemetry.*")
+        logger.info(f"Consuming orders from: mokametrics.order")
+        logger.info(f"Sending telemetry to: mokametrics.telemetry.*")
         logger.info(f"Health check available at: http://localhost:{self.health_server.port}/health")
         
         # Wait for all tasks

@@ -32,7 +32,7 @@ def get_machine_simulator(machine_id: str, machine_type: str, location_str: str)
     
     # Create appropriate simulator
     simulator = None
-    if machine_type == "cnc_milling" or machine_type == "fresa_cnc":
+    if machine_type == "cnc" or machine_type == "fresa_cnc":
         simulator = CNCMillingSimulator(machine_id, location)
     elif machine_type == "lathe" or machine_type == "tornio":
         simulator = LatheSimulator(machine_id, location)
