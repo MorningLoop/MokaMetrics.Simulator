@@ -17,7 +17,7 @@ api:
 
 # Health Check Configuration
 health_check:
-  port: 8083
+  port: 8084
 
 # Factory Configuration
 factory:

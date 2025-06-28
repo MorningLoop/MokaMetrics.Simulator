@@ -39,13 +39,13 @@ async def start_web_interface():
         
         # Start server
         print("🚀 Starting web server...")
-        interface = WebInterface(host="0.0.0.0", port=8081)
+        interface = WebInterface(host="0.0.0.0", port=8082)
         runner = await interface.start_server()
         
         print("\n" + "=" * 50)
         print("🎉 Web Interface Started Successfully!")
         print("=" * 50)
-        print(f"🌐 Access at: http://localhost:8081")
+        print(f"🌐 Access at: http://localhost:8082")
         print("📱 Mobile friendly interface")
         print("🎮 Start/stop simulator controls")
         print("📦 Add lots manually")
