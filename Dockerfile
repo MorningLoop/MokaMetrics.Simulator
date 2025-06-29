@@ -1,4 +1,22 @@
-# MokaMetrics Simulator Docker Image
+# Multi-stage Docker build for MokaMetrics.Simulator
+# Stage 1: Build React frontend
+FROM node:18-alpine AS frontend-builder
+
+WORKDIR /app/frontend
+
+# Copy package files
+COPY frontend/package*.json ./
+
+# Install dependencies
+RUN npm ci --only=production
+
+# Copy source code
+COPY frontend/ ./
+
+# Build the React app
+RUN npm run build
+
+# Stage 2: Python runtime with React build
 FROM python:3.11-slim
 
 # Set working directory
@@ -28,6 +46,9 @@ COPY Simulator/ ./Simulator/
 COPY config.yaml .
 COPY *.py .
 
+# Copy React build from frontend-builder stage
+COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+
 # Copy and set up entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
@@ -37,15 +58,15 @@ RUN useradd --create-home --shell /bin/bash simulator && \
     chown -R simulator:simulator /app
 USER simulator
 
-# Expose health check port
-EXPOSE 8083
+# Expose web interface port
+EXPOSE 8081
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8083/health || exit 1
+    CMD curl -f http://localhost:8081/health || exit 1
 
 # Set entrypoint
 ENTRYPOINT ["docker-entrypoint.sh"]
 
-# Default command
-CMD ["python", "-m", "Simulator.main"]
+# Default command - start web interface with React frontend
+CMD ["python", "-m", "Simulator.web_interface"]

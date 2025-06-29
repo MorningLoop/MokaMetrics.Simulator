@@ -1,54 +1,65 @@
-version: '3.8'
+version: "3.8"
 
 services:
-  mokametrics-simulator:
-    build: .
-    container_name: mokametrics-simulator
-    restart: unless-stopped
-    ports:
-      - "8083:8083"  # Health check port
-    environment:
-      # Kafka Configuration
-      - KAFKA_BROKER=165.227.168.240:29093
-      
-      # API Configuration (optional)
-      - MOKAMETRICS_API_KEY=${MOKAMETRICS_API_KEY:-}
-      - ENABLE_API=${ENABLE_API:-false}
-      
-      # Health Check Configuration
-      - HEALTH_CHECK_PORT=8083
-      
-      # Logging Configuration
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      
-    volumes:
-      # Mount config file for easy updates
-      - ./config.yaml:/app/config.yaml:ro
-      
-      # Optional: Mount logs directory
-      - ./logs:/app/logs
-      
-    networks:
-      - mokametrics-network
-      
-    # Resource limits
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-        reservations:
-          memory: 256M
-          cpus: '0.25'
-    
-    # Health check
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+    mokametrics-simulator:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        container_name: mokametrics-simulator
+        restart: unless-stopped
+        ports:
+            - "8081:8081" # Web interface port (React + API + WebSocket)
+        environment:
+            # Kafka Configuration
+            - KAFKA_BROKER=${KAFKA_BROKER:-165.227.168.240:29093}
+
+            # API Configuration (optional)
+            - MOKAMETRICS_API_KEY=${MOKAMETRICS_API_KEY:-}
+            - ENABLE_API=${ENABLE_API:-false}
+
+            # Web Interface Configuration
+            - WEB_INTERFACE_PORT=8081
+
+            # Logging Configuration
+            - LOG_LEVEL=${LOG_LEVEL:-INFO}
+            - PYTHONUNBUFFERED=1
+            - PYTHONDONTWRITEBYTECODE=1
+
+        volumes:
+            # Mount config file for easy updates
+            - ./config.yaml:/app/config.yaml:ro
+
+            # Mount logs directory
+            - ./logs:/app/logs
+
+        networks:
+            - mokametrics-network
+
+        # Resource limits
+        deploy:
+            resources:
+                limits:
+                    memory: 1G
+                    cpus: "1.0"
+                reservations:
+                    memory: 512M
+                    cpus: "0.5"
+
+        # Health check
+        healthcheck:
+            test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 60s
+
+        # Logging configuration
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "50m"
+                max-file: "3"
 
 networks:
-  mokametrics-network:
-    driver: bridge
+    mokametrics-network:
+        driver: bridge

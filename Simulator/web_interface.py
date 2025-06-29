@@ -6,7 +6,9 @@ import asyncio
 import json
 import signal
 import sys
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Set
 import weakref
 import logging
@@ -37,10 +39,29 @@ class WebInterface:
         self.websockets: Set[web.WebSocketResponse] = set()
         self.running = False
         self.broadcast_task: Optional[asyncio.Task] = None
-        
+
+        # Find React build directory
+        self.react_build_path = self._find_react_build_path()
+
         self.setup_routes()
         self.setup_cors()
-    
+
+    def _find_react_build_path(self) -> Optional[Path]:
+        """Find the React build directory"""
+        # Get the directory where this script is located
+        current_dir = Path(__file__).parent.parent  # Go up from Simulator/ to project root
+
+        # Look for frontend/dist directory
+        react_build_path = current_dir / "frontend" / "dist"
+
+        if react_build_path.exists() and (react_build_path / "index.html").exists():
+            logger.info(f"Found React build at: {react_build_path}")
+            return react_build_path
+        else:
+            logger.warning(f"React build not found at: {react_build_path}")
+            logger.warning("Falling back to embedded HTML interface")
+            return None
+
     def setup_cors(self):
         """Setup CORS for web interface"""
         if CORS_AVAILABLE:
@@ -70,8 +91,12 @@ class WebInterface:
     
     def setup_routes(self):
         """Setup web routes"""
+        # Main routes
         self.app.router.add_get('/', self.index_handler)
         self.app.router.add_get('/ws', self.websocket_handler)
+        self.app.router.add_get('/health', self.health_handler)
+
+        # API routes
         self.app.router.add_post('/api/start', self.start_simulator_handler)
         self.app.router.add_post('/api/stop', self.stop_simulator_handler)
         self.app.router.add_post('/api/add_lot', self.add_lot_handler)
@@ -79,10 +104,29 @@ class WebInterface:
         self.app.router.add_post('/api/machine_maintenance', self.machine_maintenance_handler)
         self.app.router.add_get('/api/machines', self.machines_handler)
         self.app.router.add_get('/api/status', self.status_handler)
-        # Note: No static files needed - everything is embedded in HTML
+
+        # Static file serving for React build
+        if self.react_build_path:
+            # Serve static assets
+            self.app.router.add_static('/assets', self.react_build_path / 'assets', name='assets')
+            # Catch-all route for React Router (SPA routing)
+            self.app.router.add_get('/{path:.*}', self.spa_handler)
     
     async def index_handler(self, request):
-        """Serve the main HTML page"""
+        """Serve the main HTML page - React app or embedded HTML fallback"""
+        # Try to serve React build first
+        if self.react_build_path:
+            try:
+                index_file = self.react_build_path / "index.html"
+                if index_file.exists():
+                    with open(index_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    return web.Response(text=content, content_type='text/html')
+            except Exception as e:
+                logger.error(f"Error serving React build: {e}")
+                logger.info("Falling back to embedded HTML")
+
+        # Fallback to embedded HTML
         html_content = """
 <!DOCTYPE html>
 <html lang="en">
@@ -1666,11 +1710,30 @@ class WebInterface:
         """
         return web.Response(text=html_content, content_type='text/html')
 
+    async def spa_handler(self, request):
+        """Handle SPA routing - serve index.html for all non-API routes"""
+        if self.react_build_path:
+            try:
+                index_file = self.react_build_path / "index.html"
+                if index_file.exists():
+                    with open(index_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    return web.Response(text=content, content_type='text/html')
+            except Exception as e:
+                logger.error(f"Error serving SPA route: {e}")
 
+        # Fallback to 404 if React build not available
+        return web.Response(text="Page not found", status=404)
 
-
-
-
+    async def health_handler(self, request):
+        """Health check endpoint"""
+        return web.json_response({
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "simulator_running": self.running,
+            "websocket_clients": len(self.websockets),
+            "react_build_available": self.react_build_path is not None
+        })
 
     async def websocket_handler(self, request):
         """Handle WebSocket connections"""
