@@ -101,6 +101,7 @@ class WebInterface:
         self.app.router.add_post('/api/stop', self.stop_simulator_handler)
         self.app.router.add_post('/api/add_lot', self.add_lot_handler)
         self.app.router.add_post('/api/start_processing', self.start_processing_handler)
+        self.app.router.add_post('/api/delete_queued_lots', self.delete_queued_lots_handler)
         self.app.router.add_post('/api/machine_maintenance', self.machine_maintenance_handler)
         self.app.router.add_get('/api/machines', self.machines_handler)
         self.app.router.add_get('/api/status', self.status_handler)
@@ -379,6 +380,15 @@ class WebInterface:
         .btn-process:hover {
             background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%);
             box-shadow: 0 8px 25px rgba(59, 130, 246, 0.4);
+        }
+        .btn-delete {
+            background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+            color: white;
+            box-shadow: 0 4px 15px rgba(220, 38, 38, 0.3);
+        }
+        .btn-delete:hover {
+            background: linear-gradient(135deg, #b91c1c 0%, #991b1b 100%);
+            box-shadow: 0 8px 25px rgba(220, 38, 38, 0.4);
         }
         .btn:disabled {
             background: #bdc3c7; cursor: not-allowed;
@@ -777,6 +787,9 @@ class WebInterface:
                 </button>
                 <button class="btn btn-process" id="startProcessingBtn" onclick="startProcessing()" disabled>
                     <i class="fas fa-rocket"></i> Start Processing Queued Lots
+                </button>
+                <button class="btn btn-delete" id="deleteQueuedBtn" onclick="deleteQueuedLots()" disabled>
+                    <i class="fas fa-trash"></i> Delete Queued Lots
                 </button>
             </div>
         </div>
@@ -1446,11 +1459,13 @@ class WebInterface:
             const startBtn = document.getElementById('startBtn');
             const stopBtn = document.getElementById('stopBtn');
             const startProcessingBtn = document.getElementById('startProcessingBtn');
+            const deleteQueuedBtn = document.getElementById('deleteQueuedBtn');
             const addLotBtn = document.getElementById('addLotBtn');
 
             startBtn.disabled = simulatorRunning;
             stopBtn.disabled = !simulatorRunning;
             startProcessingBtn.disabled = !simulatorRunning;
+            deleteQueuedBtn.disabled = !simulatorRunning;
 
             // Re-validate form to update add lot button
             validateForm();
@@ -1522,12 +1537,39 @@ class WebInterface:
                 showAddLotStatus('error', `❌ Error: ${error.message}`);
             }
         }
-        
+
+        async function deleteQueuedLots() {
+            try {
+                // Confirm deletion
+                if (!confirm('Are you sure you want to delete ALL queued lots? This action cannot be undone.')) {
+                    return;
+                }
+
+                showAddLotStatus('info', '🗑️ Deleting queued lots...');
+
+                const response = await fetch('/api/delete_queued_lots', { method: 'POST' });
+                const result = await response.json();
+
+                if (result.success) {
+                    if (result.total_deleted > 0) {
+                        showAddLotStatus('success', `✅ ${result.message}`);
+                    } else {
+                        showAddLotStatus('info', `ℹ️ ${result.message}`);
+                    }
+                } else {
+                    showAddLotStatus('error', `❌ ${result.error}`);
+                }
+            } catch (error) {
+                showAddLotStatus('error', `❌ Error: ${error.message}`);
+            }
+        }
+
         function updateControlButtons() {
             document.getElementById('startBtn').disabled = simulatorRunning;
             document.getElementById('stopBtn').disabled = !simulatorRunning;
             document.getElementById('addLotBtn').disabled = !simulatorRunning;
             document.getElementById('startProcessingBtn').disabled = !simulatorRunning;
+            document.getElementById('deleteQueuedBtn').disabled = !simulatorRunning;
             updateMaintenanceButtons();
         }
 
@@ -1879,8 +1921,8 @@ class WebInterface:
                 return web.json_response({"success": False, "error": "Simulator not running"})
 
             # Get current status to see queued lots
-            status = self.simulator.production_coordinator.get_status()
-            queued_lots = status.get("queues", {}).get("queued", {}).get("size", 0)
+            status = await self.simulator.production_coordinator.get_status()
+            queued_lots = status.get("queues", {}).get("queued", {}).get("pieces", 0)
             
             if queued_lots == 0:
                 return web.json_response({"success": False, "error": "No lots in queue to process"})
@@ -1896,6 +1938,39 @@ class WebInterface:
 
         except Exception as e:
             logger.error(f"Error starting lot processing: {e}")
+            return web.json_response({"success": False, "error": str(e)})
+
+    async def delete_queued_lots_handler(self, request):
+        """Delete all queued lots"""
+        try:
+            if not self.simulator or not self.running:
+                return web.json_response({"success": False, "error": "Simulator not running"})
+
+            # Call the delete method on the production coordinator
+            result = await self.simulator.production_coordinator.delete_queued_lots()
+
+            if result["success"]:
+                deleted_count = result["total_deleted"]
+                pieces_cleared = result["pieces_cleared"]
+
+                if deleted_count > 0:
+                    message = f"Successfully deleted {deleted_count} queued lot(s) and cleared {pieces_cleared} pieces from queue"
+                    logger.info(f"Deleted queued lots via web interface: {deleted_count} lots, {pieces_cleared} pieces")
+                else:
+                    message = "No queued lots to delete"
+
+                return web.json_response({
+                    "success": True,
+                    "message": message,
+                    "deleted_lots": result["deleted_lots"],
+                    "total_deleted": deleted_count,
+                    "pieces_cleared": pieces_cleared
+                })
+            else:
+                return web.json_response({"success": False, "error": result["error"]})
+
+        except Exception as e:
+            logger.error(f"Error deleting queued lots: {e}")
             return web.json_response({"success": False, "error": str(e)})
 
     async def machine_maintenance_handler(self, request):

@@ -68,7 +68,7 @@ class CoffeeMekSimulator:
             "Brasile": {"fresa_cnc": 1, "tornio": 1, "linea_assemblaggio": 1, "linea_test": 1},
             "Vietnam": {"fresa_cnc": 1, "tornio": 1, "linea_assemblaggio": 1, "linea_test": 1}
         })
-        self.production_coordinator.initialize_machines(machine_config)
+        await self.production_coordinator.initialize_machines(machine_config)
         
         self.running = True
         
@@ -108,18 +108,18 @@ class CoffeeMekSimulator:
         while self.running:
             try:
                 await asyncio.sleep(60)  # Report every minute
-                
-                status = self.production_coordinator.get_status()
+
+                status = await self.production_coordinator.get_status()
                 logger.info(f"Production Status: {status['active_lots']} active lots")
-                
+
                 # Log queue sizes
                 for stage, info in status['queues'].items():
-                    if info['size'] > 0:
-                        logger.info(f"  {stage}: {info['size']} lots waiting")
-                
+                    if info['pieces'] > 0:
+                        logger.info(f"  {stage}: {info['pieces']} pieces waiting")
+
                 # Update health server metrics
                 self.health_server.message_count = sum(
-                    info['size'] for info in status['queues'].values()
+                    info['pieces'] for info in status['queues'].values()
                 )
                 
             except Exception as e:

@@ -80,7 +80,7 @@ async def test_production_coordinator():
     coordinator = ProductionCoordinator(None)
     
     # Initialize machines
-    coordinator.initialize_machines(config['machines'])
+    await coordinator.initialize_machines(config['machines'])
     
     # Check that CNC machines were created
     cnc_machines = coordinator.machine_pool.machines.get('cnc', [])

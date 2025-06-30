@@ -186,47 +186,103 @@ class Machine:
     maintenance_started: Optional[datetime] = None
 
 class ProductionQueue:
-    """FIFO queue for each production stage - now handles individual pieces"""
+    """FIFO queue for each production stage - now handles individual pieces with thread safety"""
 
     def __init__(self, stage: ProductionStage):
         self.stage = stage
         self.queue: deque[ProductionPiece] = deque()
         self.high_priority_queue: deque[ProductionPiece] = deque()
+        self._lock = asyncio.Lock()  # Add async lock for concurrent access
 
-    def add(self, piece: ProductionPiece):
-        """Add piece to queue based on priority"""
-        if piece.priority == "high":
-            self.high_priority_queue.append(piece)
-        else:
-            self.queue.append(piece)
-        logger.debug(f"Added piece {piece.piece_id} to {self.stage.value} queue")
+    async def add(self, piece: ProductionPiece):
+        """Add piece to queue based on priority (thread-safe)"""
+        async with self._lock:
+            if piece.priority == "high":
+                self.high_priority_queue.append(piece)
+            else:
+                self.queue.append(piece)
+            logger.debug(f"Added piece {piece.piece_id} to {self.stage.value} queue")
 
-    def get_next(self) -> Optional[ProductionPiece]:
-        """Get next piece from queue (high priority first)"""
-        if self.high_priority_queue:
-            return self.high_priority_queue.popleft()
-        elif self.queue:
-            return self.queue.popleft()
-        return None
+    async def get_next(self) -> Optional[ProductionPiece]:
+        """Get next piece from queue (high priority first, thread-safe)"""
+        async with self._lock:
+            if self.high_priority_queue:
+                return self.high_priority_queue.popleft()
+            elif self.queue:
+                return self.queue.popleft()
+            return None
 
-    def size(self) -> int:
-        """Get total queue size"""
-        return len(self.queue) + len(self.high_priority_queue)
+    async def size(self) -> int:
+        """Get total queue size (thread-safe)"""
+        async with self._lock:
+            return len(self.queue) + len(self.high_priority_queue)
 
-    def get_pieces(self) -> List[ProductionPiece]:
-        """Get all pieces in queue"""
-        return list(self.high_priority_queue) + list(self.queue)
+    async def get_pieces(self) -> List[ProductionPiece]:
+        """Get all pieces in queue (thread-safe)"""
+        async with self._lock:
+            return list(self.high_priority_queue) + list(self.queue)
 
-    def get_lots_in_queue(self) -> Set[str]:
-        """Get unique lot codes that have pieces in this queue"""
-        lot_codes = set()
-        for piece in self.get_pieces():
-            lot_codes.add(piece.lot_code)
-        return lot_codes
+    async def get_lots_in_queue(self) -> Set[str]:
+        """Get unique lot codes that have pieces in this queue (thread-safe)"""
+        async with self._lock:
+            lot_codes = set()
+            for piece in list(self.high_priority_queue) + list(self.queue):
+                lot_codes.add(piece.lot_code)
+            return lot_codes
+
+    async def remove_specific_piece(self, piece_id: str) -> Optional[ProductionPiece]:
+        """Remove a specific piece from the queue by piece_id (thread-safe)"""
+        async with self._lock:
+            # Check high priority queue first
+            for i, piece in enumerate(self.high_priority_queue):
+                if piece.piece_id == piece_id:
+                    if i == 0:
+                        return self.high_priority_queue.popleft()
+                    else:
+                        # Remove from middle of queue
+                        temp_pieces = []
+                        found_piece = None
+                        for _ in range(i):
+                            temp_pieces.append(self.high_priority_queue.popleft())
+                        if self.high_priority_queue:
+                            found_piece = self.high_priority_queue.popleft()
+                        # Put back the pieces we removed
+                        for temp_piece in reversed(temp_pieces):
+                            self.high_priority_queue.appendleft(temp_piece)
+                        return found_piece
+
+            # Check regular queue
+            for i, piece in enumerate(self.queue):
+                if piece.piece_id == piece_id:
+                    if i == 0:
+                        return self.queue.popleft()
+                    else:
+                        # Remove from middle of queue
+                        temp_pieces = []
+                        found_piece = None
+                        for _ in range(i):
+                            temp_pieces.append(self.queue.popleft())
+                        if self.queue:
+                            found_piece = self.queue.popleft()
+                        # Put back the pieces we removed
+                        for temp_piece in reversed(temp_pieces):
+                            self.queue.appendleft(temp_piece)
+                        return found_piece
+
+            return None
+
+    async def clear_all(self):
+        """Clear all pieces from the queue (thread-safe)"""
+        async with self._lock:
+            cleared_count = len(self.queue) + len(self.high_priority_queue)
+            self.queue.clear()
+            self.high_priority_queue.clear()
+            logger.info(f"Cleared {cleared_count} pieces from {self.stage.value} queue")
+            return cleared_count
 
 class MachinePool:
-    """Manages available machines for each type and location"""
-    
+    """Manages available machines for each type and location with thread safety"""
+
     def __init__(self):
         self.machines: Dict[str, List[Machine]] = {
             "cnc": [],
@@ -235,68 +291,75 @@ class MachinePool:
             "test": []
         }
         self.all_machines: Dict[str, Machine] = {}
-    
-    def add_machine(self, machine: Machine):
-        """Add a machine to the pool"""
-        self.machines[machine.machine_type].append(machine)
-        self.all_machines[machine.machine_id] = machine
-        logger.info(f"Added machine {machine.machine_id} to pool")
-    
-    def get_available_machine(self, machine_type: str, location: str) -> Optional[Machine]:
-        """Get an available machine of specified type in location"""
-        for machine in self.machines.get(machine_type, []):
-            if not machine.is_busy and not machine.in_maintenance and machine.location == location:
-                return machine
-        return None
-    
-    def assign_piece(self, machine: Machine, piece: ProductionPiece, processing_time: int):
-        """Assign a piece to a machine"""
-        machine.is_busy = True
-        machine.current_piece = piece.piece_id
-        machine.current_lot = piece.lot_code  # Keep for compatibility
-        machine.busy_since = datetime.now()
-        machine.expected_completion = datetime.now() + timedelta(seconds=processing_time)
-        piece.current_machine = machine.machine_id
-        piece.stage_start_time = machine.busy_since
-        logger.info(f"Assigned piece {piece.piece_id} (lot {piece.lot_code}) to machine {machine.machine_id}")
+        self._lock = asyncio.Lock()  # Add async lock for concurrent access
 
-    def assign_lot(self, machine: Machine, lot: ProductionLot, processing_time: int):
-        """Legacy method - kept for compatibility"""
+    async def add_machine(self, machine: Machine):
+        """Add a machine to the pool (thread-safe)"""
+        async with self._lock:
+            self.machines[machine.machine_type].append(machine)
+            self.all_machines[machine.machine_id] = machine
+            logger.info(f"Added machine {machine.machine_id} to pool")
+
+    async def get_available_machine(self, machine_type: str, location: str) -> Optional[Machine]:
+        """Get an available machine of specified type in location (thread-safe)"""
+        async with self._lock:
+            for machine in self.machines.get(machine_type, []):
+                if not machine.is_busy and not machine.in_maintenance and machine.location == location:
+                    return machine
+            return None
+
+    async def assign_piece(self, machine: Machine, piece: ProductionPiece, processing_time: int):
+        """Assign a piece to a machine (thread-safe)"""
+        async with self._lock:
+            machine.is_busy = True
+            machine.current_piece = piece.piece_id
+            machine.current_lot = piece.lot_code  # Keep for compatibility
+            machine.busy_since = datetime.now()
+            machine.expected_completion = datetime.now() + timedelta(seconds=processing_time)
+            piece.current_machine = machine.machine_id
+            piece.stage_start_time = machine.busy_since
+            logger.info(f"Assigned piece {piece.piece_id} (lot {piece.lot_code}) to machine {machine.machine_id}")
+
+    async def assign_lot(self, machine: Machine, lot: ProductionLot, processing_time: int):
+        """Legacy method - kept for compatibility (thread-safe)"""
         # This method is deprecated but kept for any remaining legacy code
-        machine.is_busy = True
-        machine.current_lot = lot.lot_code
-        machine.busy_since = datetime.now()
-        machine.expected_completion = datetime.now() + timedelta(seconds=processing_time)
-        lot.current_machine = machine.machine_id
-        lot.stage_start_time = machine.busy_since
-        logger.info(f"Assigned lot {lot.lot_code} to machine {machine.machine_id}")
-    
-    def free_machine(self, machine_id: str):
-        """Free a machine after processing"""
-        machine = self.all_machines.get(machine_id)
-        if machine:
-            machine.is_busy = False
-            machine.current_piece = None
-            machine.current_lot = None
-            machine.busy_since = None
-            machine.expected_completion = None
+        async with self._lock:
+            machine.is_busy = True
+            machine.current_lot = lot.lot_code
+            machine.busy_since = datetime.now()
+            machine.expected_completion = datetime.now() + timedelta(seconds=processing_time)
+            lot.current_machine = machine.machine_id
+            lot.stage_start_time = machine.busy_since
+            logger.info(f"Assigned lot {lot.lot_code} to machine {machine.machine_id}")
 
-            # Update machine simulator status
-            from .Machine import get_machine_simulator
-            simulator = get_machine_simulator(machine_id, machine.machine_type, machine.location)
-            if simulator:
-                simulator.current_lot = None
-                simulator.processing_start_time = None
-                simulator.expected_completion_time = None
-                simulator.update_status("idle")
+    async def free_machine(self, machine_id: str):
+        """Free a machine after processing (thread-safe)"""
+        async with self._lock:
+            machine = self.all_machines.get(machine_id)
+            if machine:
+                machine.is_busy = False
+                machine.current_piece = None
+                machine.current_lot = None
+                machine.busy_since = None
+                machine.expected_completion = None
 
-            logger.info(f"Freed machine {machine_id}")
-    
-    def set_machine_maintenance(self, machine_id: str, in_maintenance: bool, reason: str = None):
-        """Set machine maintenance status"""
-        machine = self.all_machines.get(machine_id)
-        if machine:
-            machine.in_maintenance = in_maintenance
+                # Update machine simulator status
+                from .Machine import get_machine_simulator
+                simulator = get_machine_simulator(machine_id, machine.machine_type, machine.location)
+                if simulator:
+                    simulator.current_lot = None
+                    simulator.processing_start_time = None
+                    simulator.expected_completion_time = None
+                    simulator.update_status("idle")
+
+                logger.info(f"Freed machine {machine_id}")
+
+    async def set_machine_maintenance(self, machine_id: str, in_maintenance: bool, reason: str = None):
+        """Set machine maintenance status (thread-safe)"""
+        async with self._lock:
+            machine = self.all_machines.get(machine_id)
+            if machine:
+                machine.in_maintenance = in_maintenance
             if in_maintenance:
                 machine.maintenance_reason = reason or "Scheduled maintenance"
                 machine.maintenance_started = datetime.now()
@@ -377,7 +440,7 @@ class ProductionCoordinator:
         # Running flag
         self.running = False
     
-    def initialize_machines(self, config: Dict[str, Dict[str, int]]):
+    async def initialize_machines(self, config: Dict[str, Dict[str, int]]):
         """Initialize machines based on configuration"""
         for location, machine_counts in config.items():
             for machine_type, count in machine_counts.items():
@@ -395,7 +458,7 @@ class ProductionCoordinator:
                         machine_type=internal_type,
                         location=location
                     )
-                    self.machine_pool.add_machine(machine)
+                    await self.machine_pool.add_machine(machine)
                     
                     # Add machine to monitoring system so it shows up in web interface
                     monitor.update_machine_status(
@@ -429,7 +492,7 @@ class ProductionCoordinator:
 
         # Add each piece to the initial queue
         for piece in pieces:
-            self.queues[ProductionStage.QUEUED].add(piece)
+            await self.queues[ProductionStage.QUEUED].add(piece)
 
         logger.info(f"Created {len(pieces)} pieces for lot {lot.lot_code}")
 
@@ -438,7 +501,8 @@ class ProductionCoordinator:
             lot.lot_code, lot.customer, lot.quantity,
             lot.location, "queued", lot.created_at
         )
-        monitor.update_queue_status("queued", self.queues[ProductionStage.QUEUED].size())
+        queue_size = await self.queues[ProductionStage.QUEUED].size()
+        monitor.update_queue_status("queued", queue_size)
 
         # Send event
         await self._send_event("lot.received", {
@@ -451,55 +515,83 @@ class ProductionCoordinator:
 
         logger.info(f"Added lot {lot.lot_code} to production queue")
     
-    async def process_queues(self):
-        """Main processing loop - check queues and assign pieces to machines"""
+    async def process_queues_for_location(self, location: str):
+        """Location-specific processing loop - check queues and assign pieces to machines for a specific location"""
+        logger.info(f"Starting concurrent processing for location: {location}")
+
         while self.running:
             try:
-                # Process each stage queue
+                # Process each stage queue for this location only
                 for stage in [ProductionStage.QUEUED, ProductionStage.CNC,
                              ProductionStage.LATHE, ProductionStage.ASSEMBLY, ProductionStage.TEST]:
 
                     queue = self.queues[stage]
-                    if queue.size() == 0:
+                    queue_size = await queue.size()
+                    if queue_size == 0:
                         continue
-
-                    # Debug logging for queue status
-                    if queue.size() > 0:
-                        lot_codes = queue.get_lots_in_queue()
-                        logger.debug(f"Processing {stage.value} queue: {queue.size()} pieces from {len(lot_codes)} lots")
 
                     # Get machine type for this stage
                     machine_type = self.stage_to_machine.get(stage)
                     if not machine_type:
                         continue
 
-                    # Try to assign pieces to available machines
-                    pieces_to_process = list(queue.get_pieces())  # Make a copy to avoid modification during iteration
-                    for piece in pieces_to_process:
-                        machine = self.machine_pool.get_available_machine(
+                    # Try to assign pieces to available machines for this location
+                    pieces_to_process = await queue.get_pieces()  # Get all pieces in queue
+                    location_pieces = [piece for piece in pieces_to_process if piece.location == location]
+
+                    if location_pieces:
+                        logger.debug(f"Location {location} processing {stage.value} queue: {len(location_pieces)} pieces")
+
+                    for piece in location_pieces:
+                        machine = await self.machine_pool.get_available_machine(
                             machine_type, piece.location
                         )
 
                         if machine:
-                            # Remove from queue using the queue's get_next method
-                            removed_piece = queue.get_next()
-                            if removed_piece and removed_piece.piece_id == piece.piece_id:
+                            # Remove the specific piece from queue
+                            removed_piece = await queue.remove_specific_piece(piece.piece_id)
+                            if removed_piece:
                                 # Start processing
                                 await self._start_processing_piece(piece, machine, stage)
-                            else:
-                                # Put it back if we got a different piece
-                                if removed_piece:
-                                    queue.add(removed_piece)
-                
-                # Check for completed processing
-                await self._check_completed_machines()
-                
+
+                # Check for completed processing for this location
+                await self._check_completed_machines_for_location(location)
+
                 # Small delay to prevent CPU spinning
-                await asyncio.sleep(1)
-                
+                await asyncio.sleep(0.5)  # Reduced delay for better responsiveness
+
             except Exception as e:
-                logger.error(f"Error in process_queues: {e}")
+                logger.error(f"Error in process_queues for location {location}: {e}")
                 await asyncio.sleep(5)
+
+
+
+    async def _check_completed_machines_for_location(self, location: str):
+        """Check for machines that have completed processing for a specific location"""
+        now = datetime.now()
+
+        for machine in self.machine_pool.all_machines.values():
+            # Only check machines for this location
+            if machine.location != location:
+                continue
+
+            if machine.is_busy and machine.expected_completion and now >= machine.expected_completion:
+                # Find the piece being processed
+                piece = None
+                if machine.current_piece:
+                    # Find the piece in the lot's pieces
+                    lot = self.lots.get(machine.current_lot)
+                    if lot and machine.current_piece in lot.pieces_in_production:
+                        piece = lot.pieces_in_production[machine.current_piece]
+
+                if piece:
+                    # Complete processing for the piece
+                    await self._complete_processing_piece(piece, machine)
+                elif machine.current_lot:
+                    # Fallback to legacy lot processing if no piece found
+                    lot = self.lots.get(machine.current_lot)
+                    if lot:
+                        await self._complete_processing(lot, machine)
     
     async def _start_processing(self, lot: ProductionLot, machine: Machine, current_stage: ProductionStage):
         """Start processing a lot on a machine"""
@@ -509,7 +601,7 @@ class ProductionCoordinator:
         logger.info(f"Starting processing for lot {lot.lot_code} on machine {machine.machine_id}, from queue stage: {current_stage.value}")
         
         # Assign lot to machine
-        self.machine_pool.assign_lot(machine, lot, processing_time)
+        await self.machine_pool.assign_lot(machine, lot, processing_time)
 
         # Update lot stage to the processing stage (not the next queue stage)
         processing_stage = self._get_processing_stage(current_stage)
@@ -559,7 +651,7 @@ class ProductionCoordinator:
         logger.info(f"Starting processing for piece {piece.piece_id} (lot {piece.lot_code}) on machine {machine.machine_id}, from queue stage: {current_stage.value}")
 
         # Assign piece to machine
-        self.machine_pool.assign_piece(machine, piece, processing_time)
+        await self.machine_pool.assign_piece(machine, piece, processing_time)
 
         # Update piece stage to the processing stage (not the next queue stage)
         processing_stage = self._get_processing_stage(current_stage)
@@ -668,7 +760,7 @@ class ProductionCoordinator:
         )
 
         # Free the machine
-        self.machine_pool.free_machine(machine.machine_id)
+        await self.machine_pool.free_machine(machine.machine_id)
 
         # Check if lot quantity is complete for this stage
         if lot.is_quantity_complete():
@@ -751,7 +843,7 @@ class ProductionCoordinator:
         )
 
         # Free the machine
-        self.machine_pool.free_machine(machine.machine_id)
+        await self.machine_pool.free_machine(machine.machine_id)
 
         # Move piece to next stage
         next_stage = self._get_next_production_stage(piece.current_stage)
@@ -774,7 +866,7 @@ class ProductionCoordinator:
         else:
             # Move piece to next stage queue
             piece.current_stage = next_stage
-            self.queues[next_stage].add(piece)
+            await self.queues[next_stage].add(piece)
             logger.info(f"Added piece {piece.piece_id} to {next_stage.value} queue")
 
         logger.info(f"Completed processing piece {piece.piece_id} on {machine.machine_id}")
@@ -976,14 +1068,18 @@ class ProductionCoordinator:
         return transitions.get(current_stage, ProductionStage.COMPLETED)
     
     async def start(self):
-        """Start the production coordinator"""
+        """Start the production coordinator with concurrent location processing"""
         self.running = True
         monitor.start()
-        logger.info("Production coordinator started")
+        logger.info("Production coordinator started with concurrent location processing")
 
-        # Start all concurrent tasks
+        # Start concurrent tasks for each location plus shared tasks
         await asyncio.gather(
-            self.process_queues(),
+            # Concurrent location processors
+            self.process_queues_for_location("Italy"),
+            self.process_queues_for_location("Brazil"),
+            self.process_queues_for_location("Vietnam"),
+            # Shared tasks
             self._high_frequency_telemetry_loop(),
             self._random_maintenance_events()
         )
@@ -1014,7 +1110,7 @@ class ProductionCoordinator:
         await monitor.stop()
         logger.info("Production coordinator stopped")
     
-    def get_status(self) -> Dict[str, Any]:
+    async def get_status(self) -> Dict[str, Any]:
         """Get current production status"""
         # Calculate total pieces in production
         total_pieces = sum(len(lot.pieces_in_production) for lot in self.lots.values())
@@ -1027,58 +1123,91 @@ class ProductionCoordinator:
         }
 
         for stage, queue in self.queues.items():
-            lot_codes_in_queue = queue.get_lots_in_queue()
+            lot_codes_in_queue = await queue.get_lots_in_queue()
+            queue_size = await queue.size()
             status["queues"][stage.value] = {
-                "pieces": queue.size(),
+                "pieces": queue_size,
                 "lots_represented": len(lot_codes_in_queue),
                 "lot_codes": list(lot_codes_in_queue)
             }
 
         return status
 
-    async def _process_single_queue_iteration(self):
-        """Process queues for a single iteration (used for manual triggering)"""
+    async def delete_queued_lots(self) -> Dict[str, Any]:
+        """Delete all queued lots and their pieces from the QUEUED stage"""
         try:
-            # Process each stage queue
-            for stage in [ProductionStage.QUEUED, ProductionStage.CNC,
-                         ProductionStage.LATHE, ProductionStage.ASSEMBLY, ProductionStage.TEST]:
-                
-                queue = self.queues[stage]
-                if queue.size() == 0:
-                    continue
-                
-                # Get machine type for this stage
-                machine_type = self.stage_to_machine.get(stage)
-                if not machine_type:
-                    continue
-                
-                # Try to assign lots to available machines
-                lots_to_process = list(queue.get_lots())  # Make a copy to avoid modification during iteration
-                for lot in lots_to_process:
-                    machine = self.machine_pool.get_available_machine(
-                        machine_type, lot.location
-                    )
-                    
-                    if machine:
-                        # Remove from queue using the queue's get_next method
-                        removed_lot = queue.get_next()
-                        if removed_lot and removed_lot.lot_code == lot.lot_code:
-                            # Start processing
-                            await self._start_processing(lot, machine, stage)
-                        else:
-                            # Put it back if we got a different lot
-                            if removed_lot:
-                                queue.add(removed_lot)
-            
-            # Check for completed processing
-            await self._check_completed_machines()
-            
-        except Exception as e:
-            logger.error(f"Error in manual queue processing: {e}")
+            # Clear the QUEUED stage queue
+            cleared_pieces = await self.queues[ProductionStage.QUEUED].clear_all()
 
-    def set_machine_maintenance(self, machine_id: str, in_maintenance: bool, reason: str = None) -> bool:
+            # Find lots that are only in QUEUED stage (not yet started processing)
+            lots_to_remove = []
+            for lot_code, lot in self.lots.items():
+                if lot.current_stage == ProductionStage.QUEUED:
+                    # Check if any pieces are in other stages
+                    pieces_in_other_stages = False
+                    for stage in [ProductionStage.CNC, ProductionStage.LATHE, ProductionStage.ASSEMBLY, ProductionStage.TEST]:
+                        stage_pieces = await self.queues[stage].get_pieces()
+                        if any(piece.lot_code == lot_code for piece in stage_pieces):
+                            pieces_in_other_stages = True
+                            break
+
+                    # Also check if any machines are processing pieces from this lot
+                    lot_being_processed = any(
+                        machine.current_lot == lot_code and machine.is_busy
+                        for machine in self.machine_pool.all_machines.values()
+                    )
+
+                    if not pieces_in_other_stages and not lot_being_processed:
+                        lots_to_remove.append(lot_code)
+
+            # Remove lots that are completely queued
+            removed_lots = []
+            for lot_code in lots_to_remove:
+                lot = self.lots.pop(lot_code, None)
+                if lot:
+                    removed_lots.append({
+                        "lot_code": lot_code,
+                        "customer": lot.customer,
+                        "quantity": lot.quantity,
+                        "location": lot.location
+                    })
+
+                    # Update monitoring
+                    monitor.complete_lot(lot_code)
+
+            # Update queue monitoring
+            queue_size = await self.queues[ProductionStage.QUEUED].size()
+            monitor.update_queue_status("queued", queue_size)
+
+            # Send event
+            if removed_lots:
+                await self._send_event("lots.deleted", {
+                    "deleted_lots": removed_lots,
+                    "total_deleted": len(removed_lots),
+                    "pieces_cleared": cleared_pieces,
+                    "timestamp": datetime.now().isoformat()
+                })
+
+            logger.info(f"Deleted {len(removed_lots)} queued lots and cleared {cleared_pieces} pieces from queue")
+
+            return {
+                "success": True,
+                "deleted_lots": removed_lots,
+                "total_deleted": len(removed_lots),
+                "pieces_cleared": cleared_pieces
+            }
+
+        except Exception as e:
+            logger.error(f"Error deleting queued lots: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+    async def set_machine_maintenance(self, machine_id: str, in_maintenance: bool, reason: str = None) -> bool:
         """Set machine maintenance status"""
-        return self.machine_pool.set_machine_maintenance(machine_id, in_maintenance, reason)
+        await self.machine_pool.set_machine_maintenance(machine_id, in_maintenance, reason)
+        return True
 
     def get_all_machines(self) -> Dict[str, Dict[str, Any]]:
         """Get detailed information about all machines"""

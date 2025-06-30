@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Factory, Wifi, WifiOff, Play } from "lucide-react";
+import { Factory, Wifi, WifiOff, Play, LogOut } from "lucide-react";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 import { Badge } from "./components/ui/badge";
@@ -8,9 +8,11 @@ import { SimulatorControls } from "./components/simulator/SimulatorControls";
 import { MachineStatusCard, type MachineData } from "./components/simulator/MachineStatusCard";
 import { ProductionChart } from "./components/simulator/ProductionChart";
 import { CoffeeBeanMascot } from "./components/simulator/CoffeeBeanMascot";
-import { RetroEffectsControl } from "./components/simulator/RetroEffectsControl";
+import { LotDetailPanel } from "./components/simulator/LotDetailPanel";
 import { LotProcessingPanel } from "./components/simulator/LotProcessingPanel";
+import { Login } from "./components/auth/Login";
 import { apiService, handleApiCall } from "./services/api";
+import { useAuthStore } from "./stores/authStore";
 
 interface ProductionDataPoint {
     time: string;
@@ -18,9 +20,20 @@ interface ProductionDataPoint {
 }
 
 function App() {
+    const { isAuthenticated } = useAuthStore();
+
+    // If not authenticated, show login page
+    if (!isAuthenticated) {
+        return <Login />;
+    }
+
+    return <AuthenticatedApp />;
+}
+
+function AuthenticatedApp() {
+    const { logout } = useAuthStore();
+    const { user } = useAuthStore();
     const { data, connected, error, lastUpdate } = useWebSocket();
-    const [retroMode, setRetroMode] = useState(false);
-    const [retroIntensity, setRetroIntensity] = useState(0);
     const [machines, setMachines] = useState<MachineData[]>([]);
     const [productionData, setProductionData] = useState<ProductionDataPoint[]>([]);
 
@@ -70,13 +83,7 @@ function App() {
         );
     };
 
-    const handleRetroModeChange = (enabled: boolean) => {
-        setRetroMode(enabled);
-    };
 
-    const handleRetroIntensityChange = (intensity: number) => {
-        setRetroIntensity(intensity);
-    };
 
     // Update production chart data when WebSocket data changes
     useEffect(() => {
@@ -116,32 +123,35 @@ function App() {
                     return "idle";
                 };
 
-                // Helper function to format machine names from snake_case to Title Case
+                // Helper function to format machine names from the new machine codes
                 const formatMachineName = (machineId: string, machineType: string) => {
-                    // Convert machine type to proper title case
+                    // Map machine types to display names
                     const typeMap: Record<string, string> = {
                         cnc: "CNC",
                         fresa_cnc: "CNC",
                         tornio: "Lathe",
+                        lathe: "Lathe",
                         assemblaggio: "Assembly",
-                        test: "Testing",
+                        assembly: "Assembly",
+                        test: "Test",
                     };
 
-                    const formattedType =
-                        typeMap[machineType] || machineType.charAt(0).toUpperCase() + machineType.slice(1);
-
-                    // Extract machine number/identifier from machine_id (e.g., "cnc_Italy_1" -> "Italy 1")
+                    // Parse the machine ID format: type_location (e.g., "cnc_brazil", "lathe_italy")
                     const parts = machineId.split("_");
-                    if (parts.length >= 3) {
-                        // Format: type_location_number -> "Type Location Number"
+                    if (parts.length >= 2) {
+                        const type = parts[0];
                         const location = parts[1];
-                        const number = parts[2];
-                        return `${formattedType} ${location} ${number}`;
-                    } else if (parts.length === 2) {
-                        // Format: type_number -> "Type Number"
-                        return `${formattedType} ${parts[1]}`;
+
+                        // Format type name
+                        const formattedType = typeMap[type] || type.charAt(0).toUpperCase() + type.slice(1);
+
+                        // Format location name
+                        const formattedLocation = location.charAt(0).toUpperCase() + location.slice(1);
+
+                        return `${formattedType} ${formattedLocation}`;
                     } else {
-                        // Fallback: just use the formatted type and ID
+                        // Fallback for unexpected formats
+                        const formattedType = typeMap[machineType] || machineType.charAt(0).toUpperCase() + machineType.slice(1);
                         return `${formattedType} ${machineId}`;
                     }
                 };
@@ -186,14 +196,59 @@ function App() {
                     lastUpdate: new Date(),
                 };
             });
-            // Show only first 8 machines to avoid UI clutter
-            setMachines(realMachines.slice(0, 8));
+
+            // With exactly 12 machines (1 per type per location), show all machines
+            setMachines(realMachines);
         } else if (machines.length === 0) {
             // Fallback to mock data if no real data available yet
             const mockMachines: MachineData[] = [
                 {
-                    id: "cnc_001",
-                    name: "CNC Mill #1",
+                    id: "lathe_brazil",
+                    name: "Lathe Brazil",
+                    type: "lathe",
+                    status: "idle",
+                    currentLot: undefined,
+                    progress: 0,
+                    facility: "Brazil",
+                    throughput: 0,
+                    lastUpdate: new Date(),
+                },
+                {
+                    id: "cnc_brazil",
+                    name: "CNC Brazil",
+                    type: "cnc",
+                    status: "idle",
+                    currentLot: undefined,
+                    progress: 0,
+                    facility: "Brazil",
+                    throughput: 0,
+                    lastUpdate: new Date(),
+                },
+                {
+                    id: "cnc_vietnam",
+                    name: "CNC Vietnam",
+                    type: "cnc",
+                    status: "idle",
+                    currentLot: undefined,
+                    progress: 0,
+                    facility: "Vietnam",
+                    throughput: 0,
+                    lastUpdate: new Date(),
+                },
+                {
+                    id: "lathe_italy",
+                    name: "Lathe Italy",
+                    type: "lathe",
+                    status: "idle",
+                    currentLot: undefined,
+                    progress: 0,
+                    facility: "Italy",
+                    throughput: 0,
+                    lastUpdate: new Date(),
+                },
+                {
+                    id: "cnc_italy",
+                    name: "CNC Italy",
                     type: "cnc",
                     status: "idle",
                     currentLot: undefined,
@@ -203,9 +258,20 @@ function App() {
                     lastUpdate: new Date(),
                 },
                 {
-                    id: "lathe_001",
-                    name: "Lathe #1",
-                    type: "tornio",
+                    id: "test_vietnam",
+                    name: "Test Vietnam",
+                    type: "test",
+                    status: "idle",
+                    currentLot: undefined,
+                    progress: 0,
+                    facility: "Vietnam",
+                    throughput: 0,
+                    lastUpdate: new Date(),
+                },
+                {
+                    id: "test_brazil",
+                    name: "Test Brazil",
+                    type: "test",
                     status: "idle",
                     currentLot: undefined,
                     progress: 0,
@@ -214,9 +280,53 @@ function App() {
                     lastUpdate: new Date(),
                 },
                 {
-                    id: "assembly_001",
-                    name: "Assembly Line #1",
-                    type: "assemblaggio",
+                    id: "test_italy",
+                    name: "Test Italy",
+                    type: "test",
+                    status: "idle",
+                    currentLot: undefined,
+                    progress: 0,
+                    facility: "Italy",
+                    throughput: 0,
+                    lastUpdate: new Date(),
+                },
+                {
+                    id: "assembly_italy",
+                    name: "Assembly Italy",
+                    type: "assembly",
+                    status: "idle",
+                    currentLot: undefined,
+                    progress: 0,
+                    facility: "Italy",
+                    throughput: 0,
+                    lastUpdate: new Date(),
+                },
+                {
+                    id: "assembly_brazil",
+                    name: "Assembly Brazil",
+                    type: "assembly",
+                    status: "idle",
+                    currentLot: undefined,
+                    progress: 0,
+                    facility: "Brazil",
+                    throughput: 0,
+                    lastUpdate: new Date(),
+                },
+                {
+                    id: "assembly_vietnam",
+                    name: "Assembly Vietnam",
+                    type: "assembly",
+                    status: "idle",
+                    currentLot: undefined,
+                    progress: 0,
+                    facility: "Vietnam",
+                    throughput: 0,
+                    lastUpdate: new Date(),
+                },
+                {
+                    id: "lathe_vietnam",
+                    name: "Lathe Vietnam",
+                    type: "lathe",
                     status: "idle",
                     currentLot: undefined,
                     progress: 0,
@@ -241,10 +351,7 @@ function App() {
     }, [data?.machine_utilization, machines.length]);
 
     return (
-        <div
-            className={`min-h-screen p-4 ${retroMode ? "retro-mode" : "bg-gradient-to-br from-blue-50 to-indigo-100"}`}
-            style={retroMode ? ({ "--retro-intensity": retroIntensity / 100 } as React.CSSProperties) : {}}
-        >
+        <div className="min-h-screen p-4 bg-gradient-to-br from-blue-50 to-indigo-100">
             <div className="container mx-auto max-w-7xl">
                 {/* Header */}
                 <header className="mb-6">
@@ -259,6 +366,9 @@ function App() {
                                     Ultra Fast Testing Mode - 40-second total production cycles
                                 </p>
                                 <p className="text-sm text-gray-500">Kafka Broker: 165.227.168.240:29093</p>
+                                {user && (
+                                    <p className="text-sm text-blue-600">Welcome, {user.username}!</p>
+                                )}
                             </div>
                         </div>
 
@@ -286,9 +396,17 @@ function App() {
                                 </Button>
                             )}
 
-                            {/* Simple Retro Toggle for Header */}
-                            <Button variant="outline" size="sm" onClick={() => setRetroMode(!retroMode)}>
-                                {retroMode ? "🖥️ Normal" : "🕹️ Retro"}
+
+
+                            {/* Logout Button */}
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={logout}
+                                className="text-red-600 border-red-200 hover:bg-red-50"
+                            >
+                                <LogOut className="h-4 w-4 mr-2" />
+                                Logout
                             </Button>
 
                             {lastUpdate && (
@@ -404,10 +522,10 @@ function App() {
                             isActive={data?.simulator_running || false}
                         />
 
-                        {/* Enhanced Retro Effects Control */}
-                        <RetroEffectsControl
-                            onRetroModeChange={handleRetroModeChange}
-                            onEffectIntensityChange={handleRetroIntensityChange}
+                        {/* Lot Detail Panel */}
+                        <LotDetailPanel
+                            isConnected={connected}
+                            isSimulatorRunning={data?.simulator_running || false}
                         />
 
                         {/* Lot Processing Panel */}
@@ -427,7 +545,7 @@ function App() {
                         {lastUpdate?.toLocaleTimeString() || "Never"}
                     </p>
                     <p className="text-xs mt-2">
-                        Phase 3 Complete: Animated Mascot, Enhanced Retro Effects, Lot Processing
+                        Features: Animated Mascot, Lot Details, Lot Processing
                     </p>
                 </div>
             </div>

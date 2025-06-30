@@ -97,16 +97,16 @@ deploy() {
     
     print_status "Building Docker image..."
     if [ "$mode" = "dev" ]; then
-        docker-compose -f docker-compose.dev.yml build
+        docker compose -f docker-compose.dev.yml build
     else
-        docker-compose build
+        docker compose build
     fi
     
     print_status "Starting MokaMetrics Simulator..."
     if [ "$mode" = "dev" ]; then
-        docker-compose -f docker-compose.dev.yml up -d
+        docker compose -f docker-compose.dev.yml up -d
     else
-        docker-compose up -d
+        docker compose up -d
     fi
     
     # Wait for the container to start

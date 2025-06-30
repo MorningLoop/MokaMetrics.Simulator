@@ -206,9 +206,6 @@ class KafkaDataSender:
             return False
 
         try:
-            # Determine topic based on machine type
-            machine_type = data.get("macchina", "unknown").lower().replace(" ", "_")
-            topic = f"coffeemek.telemetry.{machine_type}"
 
             # Use lot code as key for partitioning
             key = data.get("codice_lotto", None)

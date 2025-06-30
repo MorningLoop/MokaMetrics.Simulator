@@ -27,22 +27,23 @@ factory:
     Vietnam: "VN"
 
 # Machine Configuration by Location
+# Exactly 1 machine per type per location = 12 total machines
 machines:
   Italy:
-    cnc: 3
-    lathe: 2
+    cnc: 1
+    lathe: 1
     assembly_line: 1
     test_line: 1
   Brazil:
-    cnc: 2
-    lathe: 3
-    assembly_line: 2
+    cnc: 1
+    lathe: 1
+    assembly_line: 1
     test_line: 1
   Vietnam:
-    cnc: 4
-    lathe: 3
-    assembly_line: 2
-    test_line: 2
+    cnc: 1
+    lathe: 1
+    assembly_line: 1
+    test_line: 1
 
 # Processing Time Configuration (in seconds)
 processing_times:

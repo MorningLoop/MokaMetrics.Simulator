@@ -56,7 +56,9 @@ export function MachineStatusCard({ machine, onMaintenance }: MachineStatusCardP
       'fresa_cnc': 'CNC Milling',
       'cnc': 'CNC Milling',
       'tornio': 'Lathe',
+      'lathe': 'Lathe',
       'assemblaggio': 'Assembly',
+      'assembly': 'Assembly',
       'test': 'Testing'
     }
     return typeMap[type] || type
