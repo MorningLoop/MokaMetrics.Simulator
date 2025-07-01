@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Package, Clock, User, MapPin, CheckCircle, AlertCircle, Loader2 } from 'lucide-react'
+import { Package, Clock, User, MapPin, CheckCircle, AlertCircle, Loader2, Trash2 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -15,6 +15,7 @@ interface LotDetail {
   deadline?: string
   estimatedCompletion?: string
   location: string
+  completedPieces: number
 }
 
 interface LotDetailPanelProps {
@@ -28,78 +29,142 @@ export function LotDetailPanel({
 }: LotDetailPanelProps) {
   const [lots, setLots] = useState<LotDetail[]>([])
   const [selectedLot, setSelectedLot] = useState<LotDetail | null>(null)
+  const [isRemoving, setIsRemoving] = useState(false)
 
-  // Mock data for demonstration
+  // Fetch real lots from API
   useEffect(() => {
     if (isConnected && isSimulatorRunning) {
-      const mockLots: LotDetail[] = [
-        {
-          id: 'LOT-001',
-          customer: 'Acme Corp',
-          quantity: 150,
-          status: 'in_progress',
-          currentMachine: 'CNC Italy',
-          progress: 65,
-          orderDate: '2024-01-15',
-          deadline: '2024-01-20',
-          estimatedCompletion: '2024-01-19',
-          location: 'Italy'
-        },
-        {
-          id: 'LOT-002',
-          customer: 'TechStart Inc',
-          quantity: 75,
-          status: 'in_progress',
-          currentMachine: 'Lathe Brazil',
-          progress: 35,
-          orderDate: '2024-01-16',
-          deadline: '2024-01-22',
-          estimatedCompletion: '2024-01-21',
-          location: 'Brazil'
-        },
-        {
-          id: 'LOT-003',
-          customer: 'Global Manufacturing',
-          quantity: 200,
-          status: 'completed',
-          progress: 100,
-          orderDate: '2024-01-14',
-          deadline: '2024-01-18',
-          estimatedCompletion: '2024-01-17',
-          location: 'Vietnam'
-        },
-        {
-          id: 'LOT-004',
-          customer: 'Precision Parts Ltd',
-          quantity: 120,
-          status: 'in_progress',
-          currentMachine: 'Test Vietnam',
-          progress: 80,
-          orderDate: '2024-01-17',
-          deadline: '2024-01-23',
-          estimatedCompletion: '2024-01-22',
-          location: 'Vietnam'
-        },
-        {
-          id: 'LOT-005',
-          customer: 'Industrial Solutions',
-          quantity: 90,
-          status: 'pending',
-          progress: 0,
-          orderDate: '2024-01-18',
-          deadline: '2024-01-25',
-          location: 'Italy'
+      const fetchLots = async () => {
+        try {
+          const response = await fetch('/api/status')
+          const data = await response.json()
+          const activeLots = data.active_lots || []
+          
+          // Convert API lot format to component format
+          const convertedLots: LotDetail[] = activeLots.map((lot: any) => ({
+            id: lot.lot_code,
+            customer: lot.customer,
+            quantity: lot.quantity,
+            status: mapStageToStatus(lot.current_stage),
+            currentMachine: lot.current_machine || undefined,
+            progress: lot.progress_percentage || calculateProgress(lot.current_stage), // Use real progress if available
+            orderDate: lot.order_date || new Date().toISOString().split('T')[0],
+            deadline: lot.deadline || undefined,
+            estimatedCompletion: lot.estimated_completion || undefined,
+            location: lot.location,
+            completedPieces: lot.completed_pieces || 0
+          }))
+          
+          setLots(convertedLots)
+          if (!selectedLot && convertedLots.length > 0) {
+            setSelectedLot(convertedLots[0])
+          } else if (selectedLot && !convertedLots.find(l => l.id === selectedLot.id)) {
+            setSelectedLot(convertedLots.length > 0 ? convertedLots[0] : null)
+          }
+        } catch (error) {
+          console.error('Failed to fetch lots:', error)
+          setLots([])
+          setSelectedLot(null)
         }
-      ]
-      setLots(mockLots)
-      if (!selectedLot && mockLots.length > 0) {
-        setSelectedLot(mockLots[0])
       }
+      
+      fetchLots()
+      
+      // Refresh lots every 5 seconds
+      const interval = setInterval(fetchLots, 5000)
+      return () => clearInterval(interval)
     } else {
       setLots([])
       setSelectedLot(null)
     }
   }, [isConnected, isSimulatorRunning])
+
+  // Remove lot function
+  const removeLot = async (lotId: string) => {
+    if (!lotId || isRemoving) return
+    
+    setIsRemoving(true)
+    try {
+      const response = await fetch('/api/delete_lot', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ lot_code: lotId })
+      })
+      
+      if (response.ok) {
+        // Refresh the lots list
+        const statusResponse = await fetch('/api/status')
+        const data = await statusResponse.json()
+        const activeLots = data.active_lots || []
+        
+        const convertedLots: LotDetail[] = activeLots.map((lot: any) => ({
+          id: lot.lot_code,
+          customer: lot.customer,
+          quantity: lot.quantity,
+          status: mapStageToStatus(lot.current_stage),
+          currentMachine: lot.current_machine || undefined,
+          progress: lot.progress_percentage || calculateProgress(lot.current_stage),
+          orderDate: lot.order_date || new Date().toISOString().split('T')[0],
+          deadline: lot.deadline || undefined,
+          estimatedCompletion: lot.estimated_completion || undefined,
+          location: lot.location,
+          completedPieces: lot.completed_pieces || 0
+        }))
+        
+        setLots(convertedLots)
+        
+        // If the removed lot was selected, select a new one or clear selection
+        if (selectedLot?.id === lotId) {
+          setSelectedLot(convertedLots.length > 0 ? convertedLots[0] : null)
+        }
+      } else {
+        console.error('Failed to remove lot')
+      }
+    } catch (error) {
+      console.error('Error removing lot:', error)
+    } finally {
+      setIsRemoving(false)
+    }
+  }
+
+  // Helper function to map API stage to component status
+  const mapStageToStatus = (stage: string): LotDetail['status'] => {
+    switch (stage) {
+      case 'queued':
+        return 'pending'
+      case 'cnc':
+      case 'lathe':
+      case 'assembly':
+      case 'test':
+        return 'in_progress'
+      case 'completed':
+        return 'completed'
+      default:
+        return 'pending'
+    }
+  }
+
+  // Helper function to calculate progress based on stage
+  const calculateProgress = (stage: string): number => {
+    switch (stage) {
+      case 'queued':
+        return 0
+      case 'cnc':
+        return 25
+      case 'lathe':
+        return 50
+      case 'assembly':
+        return 75
+      case 'test':
+        return 90
+      case 'completed':
+        return 100
+      default:
+        return 0
+    }
+  }
 
   const getStatusIcon = (status: LotDetail['status']) => {
     switch (status) {
@@ -202,7 +267,22 @@ export function LotDetailPanel({
               <div className="space-y-3 border-t pt-3">
                 <div className="flex items-center justify-between">
                   <h4 className="font-medium text-sm">{selectedLot.id}</h4>
-                  {getStatusBadge(selectedLot.status)}
+                  <div className="flex items-center gap-2">
+                    {getStatusBadge(selectedLot.status)}
+                    <Button
+                      onClick={() => removeLot(selectedLot.id)}
+                      disabled={isRemoving}
+                      size="sm"
+                      variant="outline"
+                      className="h-6 w-6 p-0 text-red-600 hover:text-red-700 hover:bg-red-50"
+                    >
+                      {isRemoving ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-3 w-3" />
+                      )}
+                    </Button>
+                  </div>
                 </div>
 
                 <div className="space-y-2 text-sm">
@@ -212,10 +292,18 @@ export function LotDetailPanel({
                     <span className="font-medium">{selectedLot.customer}</span>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <Package className="h-3 w-3 text-gray-500" />
-                    <span className="text-xs text-muted-foreground">Quantity:</span>
-                    <span className="font-medium">{selectedLot.quantity} units</span>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <Package className="h-3 w-3 text-gray-500" />
+                      <span className="text-xs text-muted-foreground">Quantity:</span>
+                      <span className="font-medium">{selectedLot.quantity} units</span>
+                    </div>
+                    <div className="flex items-center gap-2 ml-5">
+                      <span className="text-xs text-muted-foreground">Completed:</span>
+                      <span className="font-medium text-blue-600">
+                        {selectedLot.completedPieces}/{selectedLot.quantity}
+                      </span>
+                    </div>
                   </div>
 
                   <div className="flex items-center gap-2">

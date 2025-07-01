@@ -53,10 +53,11 @@ class MachineSimulator(ABC):
         )
     
     def generate_lot_code(self) -> str:
-        """Generate a realistic lot code - or use current lot if assigned"""
+        """Use current lot code from actual orders being processed"""
         if self.current_lot:
             return self.current_lot
-        return f"L-{random.randint(1000, 9999)}"
+        # If no lot assigned, return a placeholder - this should rarely happen
+        return "NO_LOT_ASSIGNED"
 
     def generate_factory_key(self) -> str:
         """Generate factory key based on location and machine"""

@@ -29,6 +29,9 @@ services:
 
             # Mount logs directory
             - ./logs:/app/logs
+            
+            # Mount database directory for persistence
+            - ./data:/app/data
 
         networks:
             - mokametrics-network

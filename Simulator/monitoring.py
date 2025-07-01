@@ -45,6 +45,7 @@ class LotStats:
     stage_start_time: Optional[datetime] = None
     total_processing_time: float = 0.0  # Minutes
     stages_completed: List[str] = field(default_factory=list)
+    completed_pieces: int = 0  # Track how many pieces have completed all stages
 
 @dataclass
 class QueueStats:
@@ -157,12 +158,19 @@ class SimulatorMonitor:
                     lot.stage_start_time = datetime.now()
                 lot.current_stage = current_stage
     
+    def update_piece_completion(self, lot_code: str, completed_pieces: int):
+        """Update the number of completed pieces for a lot"""
+        with self._lock:
+            if lot_code in self.lot_stats:
+                self.lot_stats[lot_code].completed_pieces = completed_pieces
+    
     def complete_lot(self, lot_code: str):
         """Mark a lot as completed"""
         with self._lock:
             if lot_code in self.lot_stats:
                 lot = self.lot_stats[lot_code]
                 lot.total_processing_time = (datetime.now() - lot.created_at).total_seconds() / 60
+                lot.completed_pieces = lot.quantity  # All pieces completed
                 self.total_lots_completed += 1
                 
                 # Update average cycle time
@@ -170,6 +178,12 @@ class SimulatorMonitor:
                     total_time = sum(lot.total_processing_time for lot in self.lot_stats.values() 
                                    if lot.current_stage == "completed")
                     self.average_cycle_time = total_time / self.total_lots_completed
+    
+    def delete_lot(self, lot_code: str):
+        """Remove a lot from monitoring completely"""
+        with self._lock:
+            if lot_code in self.lot_stats:
+                del self.lot_stats[lot_code]
     
     def update_queue_status(self, stage: str, queue_length: int, high_priority_length: int = 0):
         """Update queue status"""
@@ -203,19 +217,24 @@ class SimulatorMonitor:
                     "last_sent": stats.last_sent_time.isoformat() if stats.last_sent_time else None
                 }
             
-            # Get active lots
-            active_lots = [
-                {
-                    "lot_code": lot.lot_code,
-                    "customer": lot.customer,
-                    "quantity": lot.quantity,
-                    "location": lot.location,
-                    "current_stage": lot.current_stage,
-                    "processing_time_minutes": round(lot.total_processing_time, 2)
-                }
-                for lot in self.lot_stats.values()
-                if lot.current_stage != "completed"
-            ]
+            # Get active lots with progress
+            active_lots = []
+            for lot in self.lot_stats.values():
+                if lot.current_stage != "completed":
+                    # Calculate progress based on completed pieces vs total quantity
+                    completed_pieces = getattr(lot, 'completed_pieces', 0)
+                    progress_percentage = round((completed_pieces / lot.quantity) * 100, 1) if lot.quantity > 0 else 0
+                    
+                    active_lots.append({
+                        "lot_code": lot.lot_code,
+                        "customer": lot.customer,
+                        "quantity": lot.quantity,
+                        "location": lot.location,
+                        "current_stage": lot.current_stage,
+                        "processing_time_minutes": round(lot.total_processing_time, 2),
+                        "completed_pieces": completed_pieces,
+                        "progress_percentage": progress_percentage
+                    })
             
             # Get machine utilization
             machine_utilization = [

@@ -9,6 +9,7 @@ from collections import deque
 import random
 import pytz
 from .monitoring import monitor
+from .database import ProductionDatabase
 
 logger = logging.getLogger(__name__)
 
@@ -406,6 +407,9 @@ class ProductionCoordinator:
         self.kafka_sender = kafka_sender
         self.machine_pool = MachinePool()
         self.lots: Dict[str, ProductionLot] = {}
+        
+        # Initialize database
+        self.db = ProductionDatabase()
 
         # Queues for each stage
         self.queues = {
@@ -418,7 +422,7 @@ class ProductionCoordinator:
 
         # High-frequency telemetry tracking
         self.telemetry_enabled = True
-        self.telemetry_interval = 1.0  # Send telemetry every 1 second
+        self.telemetry_interval = 5.0  # Send telemetry every 5 seconds
         
         # Processing time ranges (in seconds) for each stage - ULTRA FAST TESTING MODE
         self.processing_times = {
@@ -453,8 +457,19 @@ class ProductionCoordinator:
                 }.get(machine_type, machine_type)
                 
                 for i in range(count):
+                    # Create machine_id in format: {type}_{site}
+                    site_mapping = {
+                        "Italy": "italy",
+                        "Brazil": "brazil", 
+                        "Vietnam": "vietnam"
+                    }
+                    site = site_mapping.get(location, location.lower())
+                    
+                    # Format: {type}_{site} (e.g., cnc_italy, lathe_brazil)
+                    machine_id = f"{internal_type}_{site}"
+                    
                     machine = Machine(
-                        machine_id=f"{internal_type}_{location}_{i+1}",
+                        machine_id=machine_id,
                         machine_type=internal_type,
                         location=location
                     )
@@ -470,6 +485,12 @@ class ProductionCoordinator:
     
     async def add_lot(self, lot_data: Dict[str, Any]):
         """Add a new lot from Kafka message"""
+        # First save to database - this creates lot and pieces atomically
+        success = await self.db.add_lot(lot_data)
+        if not success:
+            logger.error(f"Failed to save lot to database: {lot_data}")
+            return
+        
         # Support both old and new field names for backward compatibility
         lot_code = lot_data.get("lot_code") or lot_data.get("codice_lotto")
         customer = lot_data.get("customer") or lot_data.get("cliente")  
@@ -487,14 +508,14 @@ class ProductionCoordinator:
         # Create individual pieces for this lot
         pieces = lot.create_pieces()
 
-        # Add lot to tracking
+        # Add lot to in-memory tracking
         self.lots[lot.lot_code] = lot
 
-        # Add each piece to the initial queue
+        # Add each piece to the initial queue (in-memory for processing)
         for piece in pieces:
             await self.queues[ProductionStage.QUEUED].add(piece)
 
-        logger.info(f"Created {len(pieces)} pieces for lot {lot.lot_code}")
+        logger.info(f"Added lot {lot_code} to database and created {len(pieces)} pieces for processing")
 
         # Update monitoring
         monitor.update_lot_status(
@@ -504,14 +525,6 @@ class ProductionCoordinator:
         queue_size = await self.queues[ProductionStage.QUEUED].size()
         monitor.update_queue_status("queued", queue_size)
 
-        # Send event
-        await self._send_event("lot.received", {
-            "lot_code": lot.lot_code,
-            "customer": lot.customer,
-            "quantity": lot.quantity,
-            "location": lot.location,
-            "timestamp": datetime.now().isoformat()
-        })
 
         logger.info(f"Added lot {lot.lot_code} to production queue")
     
@@ -633,13 +646,6 @@ class ProductionCoordinator:
         # Send telemetry data for machine starting
         await self._send_machine_telemetry(lot, machine, "started")
         
-        # Send event
-        await self._send_event(f"{machine.machine_type}.started", {
-            "lot_code": lot.lot_code,
-            "machine_id": machine.machine_id,
-            "processing_time_seconds": processing_time,
-            "timestamp": now.isoformat()
-        })
         
         logger.info(f"Started processing lot {lot.lot_code} on {machine.machine_id}")
 
@@ -677,16 +683,8 @@ class ProductionCoordinator:
             piece.test_start = now
 
         # Send telemetry data for machine starting
-        await self._send_piece_telemetry(piece, machine, "started")
+        # await self._send_piece_telemetry(piece, machine, "started")  # Commented out to reduce message frequency
 
-        # Send event
-        await self._send_event(f"{machine.machine_type}.started", {
-            "lot_code": piece.lot_code,
-            "piece_id": piece.piece_id,
-            "machine_id": machine.machine_id,
-            "processing_time_seconds": processing_time,
-            "timestamp": now.isoformat()
-        })
 
         logger.info(f"Started processing piece {piece.piece_id} on {machine.machine_id}")
 
@@ -732,12 +730,6 @@ class ProductionCoordinator:
         # Send final telemetry for this stage
         await self._send_machine_telemetry(lot, machine, "completed")
         
-        # Send event
-        await self._send_event(f"{machine.machine_type}.completed", {
-            "lot_code": lot.lot_code,
-            "machine_id": machine.machine_id,
-            "timestamp": now.isoformat()
-        })
         
         # Simulate pieces produced during this processing cycle
         # Different machines produce different amounts per cycle
@@ -789,11 +781,6 @@ class ProductionCoordinator:
             )
             monitor.complete_lot(lot.lot_code)
 
-            await self._send_event("lot.completed", {
-                "lot_code": lot.lot_code,
-                "total_time_minutes": (now - lot.created_at).total_seconds() / 60,
-                "timestamp": now.isoformat()
-            })
             # Remove from active lots
             del self.lots[lot.lot_code]
         elif next_stage == lot.current_stage:
@@ -826,15 +813,8 @@ class ProductionCoordinator:
             piece.test_end = now
 
         # Send final telemetry for this stage
-        await self._send_piece_telemetry(piece, machine, "completed")
+        # await self._send_piece_telemetry(piece, machine, "completed")  # Commented out to reduce message frequency
 
-        # Send event
-        await self._send_event(f"{machine.machine_type}.completed", {
-            "lot_code": piece.lot_code,
-            "piece_id": piece.piece_id,
-            "machine_id": machine.machine_id,
-            "timestamp": now.isoformat()
-        })
 
         # Update monitoring for machine becoming free
         monitor.update_machine_status(
@@ -891,11 +871,6 @@ class ProductionCoordinator:
         )
         monitor.complete_lot(lot.lot_code)
 
-        await self._send_event("lot.completed", {
-            "lot_code": lot.lot_code,
-            "total_time_minutes": (now - lot.created_at).total_seconds() / 60,
-            "timestamp": now.isoformat()
-        })
 
         # Keep the lot in self.lots but mark it as completed
         # This allows status tracking to show "completed" instead of removing it entirely
@@ -908,6 +883,26 @@ class ProductionCoordinator:
         try:
             # Increment the lot's completed pieces counter
             lot.pieces_produced += 1
+            
+            # Update monitoring with current piece completion count
+            monitor.update_piece_completion(lot.lot_code, lot.pieces_produced)
+            
+            # Update database with current pieces produced count
+            if hasattr(self, 'db'):
+                try:
+                    await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: self.db.connection.execute(
+                            "UPDATE lots SET pieces_produced = ? WHERE lot_code = ?",
+                            (lot.pieces_produced, lot.lot_code)
+                        )
+                    )
+                    await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: self.db.connection.commit()
+                    )
+                except Exception as db_error:
+                    logger.error(f"Failed to update pieces_produced for lot {lot.lot_code}: {db_error}")
 
             # Calculate individual piece timing for each stage
             cnc_duration = 0
@@ -949,9 +944,47 @@ class ProductionCoordinator:
             await self.kafka_sender.send_piece_completion_data(completion_data)
 
             logger.info(f"Piece {piece.piece_id} completed - lot progress: {lot.pieces_produced}/{lot.quantity}")
+            
+            # Check if lot is now complete (all pieces finished)
+            if lot.pieces_produced >= lot.quantity:
+                await self._complete_lot(lot)
 
         except Exception as e:
             logger.error(f"Failed to send piece completion message for piece {piece.piece_id}: {e}")
+    
+    async def _complete_lot(self, lot: ProductionLot):
+        """Mark a lot as completed when all pieces are finished"""
+        try:
+            # Update lot stage to completed
+            lot.current_stage = ProductionStage.COMPLETED
+            
+            # Update database - mark lot as completed
+            if hasattr(self, 'db'):
+                # Update lot status in database
+                # We'll use a SQL update since we need to update the lot record directly
+                import sqlite3
+                try:
+                    await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: self.db.connection.execute(
+                            "UPDATE lots SET current_stage = 'completed' WHERE lot_code = ?",
+                            (lot.lot_code,)
+                        )
+                    )
+                    await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: self.db.connection.commit()
+                    )
+                except Exception as db_error:
+                    logger.error(f"Failed to update lot {lot.lot_code} in database: {db_error}")
+            
+            # Update monitoring
+            monitor.complete_lot(lot.lot_code)
+            
+            logger.info(f"🎉 Lot {lot.lot_code} COMPLETED! All {lot.quantity} pieces finished production.")
+            
+        except Exception as e:
+            logger.error(f"Error completing lot {lot.lot_code}: {e}")
 
     def _get_location_timezone(self, location: str) -> str:
         """Get timezone string for a location"""
@@ -1010,10 +1043,6 @@ class ProductionCoordinator:
             # Clear manual override since this is automatic state sync
             simulator._manual_status_override = False
 
-            # Send regular telemetry data
-            data = simulator.generate_data()
-            data["status"] = status
-            await self.kafka_sender.send_to_kafka(data)
 
             # Send telemetry data
             telemetry_data = simulator.generate_measurement_data()
@@ -1021,20 +1050,6 @@ class ProductionCoordinator:
 
     # NOTE: _send_end_of_cycle_data method removed - replaced with piece-by-piece completion messaging
     
-    async def _send_event(self, event_type: str, data: Dict[str, Any]):
-        """Send production event to Kafka"""
-        event = {
-            "event_type": event_type,
-            "data": data,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        # Send to events topic
-        await self.kafka_sender.kafka_producer.send_and_wait(
-            topic="coffeemek.events.production_status",
-            key=data.get("lot_code", ""),
-            value=event
-        )
     
     def _get_next_stage(self, current_stage: ProductionStage) -> ProductionStage:
         """Get the next processing stage (for starting)"""
@@ -1067,8 +1082,89 @@ class ProductionCoordinator:
         }
         return transitions.get(current_stage, ProductionStage.COMPLETED)
     
+    async def _restore_lots_from_database(self):
+        """Restore incomplete lots from database when simulator starts"""
+        try:
+            # Get all active lots from database
+            active_lots = await self.db.get_all_active_lots()
+            
+            for lot_data in active_lots:
+                lot_code = lot_data['lot_code']
+                logger.info(f"Restoring lot {lot_code} from database...")
+                
+                # Create ProductionLot object
+                lot = ProductionLot(
+                    lot_code=lot_code,
+                    customer=lot_data['customer'],
+                    quantity=lot_data['quantity'],
+                    location=lot_data['location'],
+                    priority=lot_data.get('priority', 'normal'),
+                    current_stage=ProductionStage(lot_data['current_stage'])
+                )
+                
+                # Set timing data if available
+                if lot_data.get('created_at'):
+                    lot.created_at = datetime.fromisoformat(lot_data['created_at'].replace('Z', '+00:00'))
+                
+                # Get all pieces for this lot from database (all stages)
+                all_pieces = []
+                for stage in ['queued', 'cnc', 'lathe', 'assembly', 'test']:
+                    stage_pieces = await self.db.get_queued_pieces(stage, lot_data['location'])
+                    lot_pieces_in_stage = [p for p in stage_pieces if p['lot_code'] == lot_code]
+                    all_pieces.extend(lot_pieces_in_stage)
+                
+                # Create ProductionPiece objects and add to lot
+                for piece_data in all_pieces:
+                    piece = ProductionPiece(
+                        piece_id=piece_data['piece_id'],
+                        lot_code=lot_code,
+                        piece_number=piece_data['piece_number'],
+                        customer=lot_data['customer'],
+                        location=lot_data['location'],
+                        priority=lot_data.get('priority', 'normal'),
+                        current_stage=ProductionStage(piece_data['current_stage'])
+                    )
+                    
+                    # Add piece to lot tracking
+                    lot.pieces_in_production[piece.piece_id] = piece
+                    
+                    # Add piece to appropriate queue
+                    stage = ProductionStage(piece_data['current_stage'])
+                    await self.queues[stage].add(piece)
+                
+                # Add lot to in-memory tracking
+                self.lots[lot_code] = lot
+                
+                # Update monitoring
+                monitor.update_lot_status(
+                    lot.lot_code, lot.customer, lot.quantity,
+                    lot.location, lot.current_stage.value, lot.created_at
+                )
+                
+                # Update piece completion count
+                completed_pieces = lot_data.get('completed_pieces', 0)
+                if completed_pieces > 0:
+                    lot.pieces_produced = completed_pieces
+                    monitor.update_piece_completion(lot_code, completed_pieces)
+                
+                logger.info(f"Restored lot {lot_code}: {len(all_pieces)} pieces across production stages")
+            
+            if active_lots:
+                logger.info(f"Successfully restored {len(active_lots)} lots from database")
+            else:
+                logger.info("No incomplete lots found in database to restore")
+                
+        except Exception as e:
+            logger.error(f"Error restoring lots from database: {e}")
+    
     async def start(self):
         """Start the production coordinator with concurrent location processing"""
+        # Initialize database first
+        await self.db.initialize()
+        
+        # Restore incomplete lots from database
+        await self._restore_lots_from_database()
+        
         self.running = True
         monitor.start()
         logger.info("Production coordinator started with concurrent location processing")
@@ -1085,16 +1181,18 @@ class ProductionCoordinator:
         )
     
     async def _high_frequency_telemetry_loop(self):
-        """Send telemetry data every second for active machines"""
+        """Send telemetry data every 5 seconds for active machines"""
         while self.running:
             try:
                 if self.telemetry_enabled:
                     # Send telemetry for all busy machines
+                    logger.info(f"Telemetry loop: sending data every {self.telemetry_interval} seconds")
                     for machine in self.machine_pool.all_machines.values():
                         if machine.is_busy and machine.current_lot:
                             # Find the lot being processed
                             lot = self.lots.get(machine.current_lot)
                             if lot:
+                                logger.info(f"Sending telemetry for machine {machine.machine_id}")
                                 await self._send_machine_telemetry(lot, machine, "processing")
 
                 # Wait for next telemetry interval
@@ -1102,12 +1200,13 @@ class ProductionCoordinator:
 
             except Exception as e:
                 logger.error(f"Error in high-frequency telemetry loop: {e}")
-                await asyncio.sleep(1)  # Continue after error
+                await asyncio.sleep(self.telemetry_interval)  # Continue after error with proper interval
 
     async def stop(self):
         """Stop the production coordinator"""
         self.running = False
         await monitor.stop()
+        await self.db.close()
         logger.info("Production coordinator stopped")
     
     async def get_status(self) -> Dict[str, Any]:
@@ -1179,14 +1278,6 @@ class ProductionCoordinator:
             queue_size = await self.queues[ProductionStage.QUEUED].size()
             monitor.update_queue_status("queued", queue_size)
 
-            # Send event
-            if removed_lots:
-                await self._send_event("lots.deleted", {
-                    "deleted_lots": removed_lots,
-                    "total_deleted": len(removed_lots),
-                    "pieces_cleared": cleared_pieces,
-                    "timestamp": datetime.now().isoformat()
-                })
 
             logger.info(f"Deleted {len(removed_lots)} queued lots and cleared {cleared_pieces} pieces from queue")
 
@@ -1202,6 +1293,62 @@ class ProductionCoordinator:
             return {
                 "success": False,
                 "error": str(e)
+            }
+    
+    async def delete_specific_lot(self, lot_code: str) -> Dict[str, Any]:
+        """Delete a specific lot and all its pieces"""
+        try:
+            if lot_code not in self.lots:
+                return {
+                    "success": False,
+                    "error": f"Lot {lot_code} not found",
+                    "lot_code": lot_code
+                }
+            
+            lot = self.lots[lot_code]
+            pieces_cleared = 0
+            
+            # Remove pieces from all queues
+            for stage, queue in self.queues.items():
+                stage_pieces = await queue.get_pieces()
+                lot_pieces_in_stage = [piece for piece in stage_pieces if piece.lot_code == lot_code]
+                
+                for piece in lot_pieces_in_stage:
+                    removed_piece = await queue.remove_specific_piece(piece.piece_id)
+                    if removed_piece:
+                        pieces_cleared += 1
+            
+            # Free any machines currently processing this lot
+            for machine in self.machine_pool.all_machines.values():
+                if machine.current_lot == lot_code and machine.is_busy:
+                    await self.machine_pool.free_machine(machine.machine_id)
+                    logger.info(f"Freed machine {machine.machine_id} from deleted lot {lot_code}")
+            
+            # Remove from database
+            if hasattr(self, 'db'):
+                await self.db.delete_lot(lot_code)
+            
+            # Remove from in-memory tracking
+            del self.lots[lot_code]
+            
+            # Remove from monitoring
+            monitor.delete_lot(lot_code)
+            
+            logger.info(f"Successfully deleted lot {lot_code} with {pieces_cleared} pieces")
+            
+            return {
+                "success": True,
+                "message": f"Successfully deleted lot {lot_code}",
+                "lot_code": lot_code,
+                "pieces_cleared": pieces_cleared
+            }
+            
+        except Exception as e:
+            logger.error(f"Error deleting lot {lot_code}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "lot_code": lot_code
             }
 
     async def set_machine_maintenance(self, machine_id: str, in_maintenance: bool, reason: str = None) -> bool:
@@ -1253,14 +1400,6 @@ class ProductionCoordinator:
                         
                         self.set_machine_maintenance(machine.machine_id, True, reason)
                         
-                        # Send event
-                        await self._send_event("machine.maintenance.started", {
-                            "machine_id": machine.machine_id,
-                            "machine_type": machine.machine_type,
-                            "location": machine.location,
-                            "reason": reason,
-                            "timestamp": datetime.now().isoformat()
-                        })
 
             except Exception as e:
                 logger.error(f"Error in random maintenance events: {e}")

@@ -6,7 +6,6 @@ kafka:
   topics:
     input: "mokametrics.order"
     telemetry_prefix: "mokametrics.telemetry"
-    events: "coffeemek.events.production_status"
     production_completion: "mokametrics.production.lot_completion"
 
 # API Configuration

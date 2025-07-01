@@ -95,20 +95,23 @@ class KafkaDataSender:
             async for msg in self.kafka_consumer:
                 try:
                     order_data = msg.value
+                    order_id = msg.key.decode('utf-8') if msg.key else 'unknown-order'
+                    
                     # Support both new and old customer field formats
                     customer_info = order_data.get('Customer') or order_data.get('CustomerId', 'unknown')
-                    logger.info(f"Received new order for customer {customer_info}")
+                    logger.info(f"Received order {order_id} for customer {customer_info}")
 
                     # Process the order and create lots
-                    await self._process_order(order_data)
+                    await self._process_order(order_data, order_id)
 
                 except Exception as e:
-                    logger.error(f"Error processing order message: {e}")
+                    order_id = msg.key.decode('utf-8') if msg.key else 'unknown-order'
+                    logger.error(f"Error processing order message {order_id}: {e}")
 
         except Exception as e:
             logger.error(f"Error in consume_lots: {e}")
 
-    async def _process_order(self, order_data: Dict[str, Any]):
+    async def _process_order(self, order_data: Dict[str, Any], order_id: str = "unknown-order"):
         """Process an order and create individual lots"""
         try:
             # Map IndustrialFacilityId to location names (for backward compatibility)
@@ -142,9 +145,12 @@ class KafkaDataSender:
 
             order_date = order_data.get("OrderDate")
             deadline = order_data.get("Deadline")
+            quantity_machines = order_data.get("QuantityMachines", 1)
+            local_timestamp = order_data.get("LocalTimestamp")
+            utc_timestamp = order_data.get("UtcTimestamp")
             lots = order_data.get("Lots", [])
 
-            logger.info(f"Processing order with {len(lots)} lots for customer {customer_name}")
+            logger.info(f"Processing order {order_id} with {len(lots)} lots for customer {customer_name} (machines: {quantity_machines})")
 
             for lot_info in lots:
                 # Extract lot information
@@ -182,50 +188,27 @@ class KafkaDataSender:
                     "location": location,
                     "priority": "normal",  # Default priority
                     "priorita": "normal",  # Keep for backward compatibility
+                    "order_id": order_id,  # New field: order ID from message key
                     "order_date": order_date,
                     "deadline": deadline,
                     "start_date": start_date,
+                    "quantity_machines": quantity_machines,  # New field: number of machines
+                    "local_timestamp": local_timestamp,  # New field: local timestamp
+                    "utc_timestamp": utc_timestamp,  # New field: UTC timestamp
                     "facility_id": facility_id_for_internal,
                     "timestamp": datetime.utcnow().isoformat()
                 }
 
-                logger.info(f"Creating lot {lot_code} with {total_quantity} pieces at {location}")
+                logger.info(f"Creating lot {lot_code} from order {order_id} with {total_quantity} pieces at {location}")
 
                 # Call the callback if set
                 if self.lot_callback:
                     await self.lot_callback(lot_data)
 
         except Exception as e:
-            logger.error(f"Error processing order: {e}")
+            logger.error(f"Error processing order {order_id}: {e}")
             raise
     
-    async def send_to_kafka(self, data: Dict[str, Any]) -> bool:
-        """Send data to Kafka topic"""
-        if not self.kafka_producer:
-            logger.error("Kafka producer not initialized")
-            return False
-
-        try:
-
-            # Use lot code as key for partitioning
-            key = data.get("codice_lotto", None)
-
-            # Send to Kafka
-            await self.kafka_producer.send_and_wait(
-                topic=topic,
-                key=key,
-                value=data
-            )
-
-            logger.info(f"Sent to Kafka topic '{topic}': {key}")
-            return True
-
-        except KafkaError as e:
-            logger.error(f"Kafka error: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to send to Kafka: {e}")
-            return False
 
     async def send_telemetry_data(self, data: Dict[str, Any], machine_type: str) -> bool:
         """Send telemetry data to specific telemetry topic"""
@@ -299,63 +282,7 @@ class KafkaDataSender:
 
 
     
-    async def send_to_api(self, data: Dict[str, Any]) -> bool:
-        """Send data to MokaMetrics API endpoint"""
-        if not self.http_session:
-            logger.error("HTTP session not initialized")
-            return False
-            
-        try:
-            # Prepare API endpoint
-            endpoint = f"{self.api_endpoint}/api/telemetry"
-            
-            headers = {
-                "Content-Type": "application/json",
-                "X-API-Key": self.config.get("api_key", ""),
-                "X-Machine-Type": data.get("macchina", "unknown"),
-                "X-Location": data.get("luogo", "unknown")
-            }
-            
-            # Add request ID for tracking
-            headers["X-Request-ID"] = f"{data.get('codice_lotto', 'unknown')}_{datetime.utcnow().timestamp()}"
-            
-            async with self.http_session.post(
-                endpoint,
-                json=data,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as response:
-                if response.status == 200:
-                    response_data = await response.json()
-                    logger.info(f"API response: {response_data.get('message', 'Success')}")
-                    return True
-                else:
-                    error_text = await response.text()
-                    logger.error(f"API returned status {response.status}: {error_text}")
-                    return False
-                    
-        except asyncio.TimeoutError:
-            logger.error("API request timed out")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to send to API: {e}")
-            return False
     
-    async def send_data(self, data: Dict[str, Any]) -> bool:
-        """Send data to Kafka (primary) and optionally to API"""
-        # Send to Kafka (primary data pipeline)
-        kafka_result = await self.send_to_kafka(data)
-        
-        # Optionally send to API if configured
-        api_result = True
-        if self.config.get("enable_api", False) and self.config.get("api_key"):
-            api_result = await self.send_to_api(data)
-        
-        # Return True if Kafka send was successful (API is optional)
-        if not kafka_result:
-            logger.error(f"Failed to send data to Kafka: {data.get('codice_lotto', 'unknown')}")
-        
-        return kafka_result
 
 class HealthCheckServer:
     """Health check HTTP server with Kafka status"""

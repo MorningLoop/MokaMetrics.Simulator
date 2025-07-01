@@ -102,6 +102,7 @@ class WebInterface:
         self.app.router.add_post('/api/add_lot', self.add_lot_handler)
         self.app.router.add_post('/api/start_processing', self.start_processing_handler)
         self.app.router.add_post('/api/delete_queued_lots', self.delete_queued_lots_handler)
+        self.app.router.add_post('/api/delete_lot', self.delete_lot_handler)
         self.app.router.add_post('/api/machine_maintenance', self.machine_maintenance_handler)
         self.app.router.add_get('/api/machines', self.machines_handler)
         self.app.router.add_get('/api/status', self.status_handler)
@@ -1973,6 +1974,31 @@ class WebInterface:
             logger.error(f"Error deleting queued lots: {e}")
             return web.json_response({"success": False, "error": str(e)})
 
+    async def delete_lot_handler(self, request):
+        """Delete a specific lot"""
+        try:
+            if not self.simulator or not self.running:
+                return web.json_response({"success": False, "error": "Simulator not running"})
+
+            data = await request.json()
+            lot_code = data.get("lot_code")
+            
+            if not lot_code:
+                return web.json_response({"success": False, "error": "lot_code is required"})
+
+            # Call the delete method on the production coordinator
+            result = await self.simulator.production_coordinator.delete_specific_lot(lot_code)
+
+            if result["success"]:
+                logger.info(f"Deleted lot {lot_code} via web interface")
+                return web.json_response(result)
+            else:
+                return web.json_response(result)
+
+        except Exception as e:
+            logger.error(f"Error deleting lot: {e}")
+            return web.json_response({"success": False, "error": str(e)})
+
     async def machine_maintenance_handler(self, request):
         """Handle machine maintenance control"""
         try:
@@ -2044,11 +2070,11 @@ class WebInterface:
                     # Remove disconnected clients
                     self.websockets -= disconnected
 
-                await asyncio.sleep(1)  # Broadcast every second
+                await asyncio.sleep(5)  # Broadcast every 5 seconds
 
             except Exception as e:
                 logger.error(f"Error broadcasting stats: {e}")
-                await asyncio.sleep(1)
+                await asyncio.sleep(5)
     
     async def start_server(self):
         """Start the web server"""
