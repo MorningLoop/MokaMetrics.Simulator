@@ -13,6 +13,7 @@ import os
 
 from .kafka_integration import KafkaDataSender, HealthCheckServer
 from .state_machine import ProductionCoordinator
+from .breakdown_simulator import MachineBreakdownSimulator, BreakdownConfig
 
 # Configure logging
 logging.basicConfig(
@@ -33,6 +34,13 @@ class CoffeeMekSimulator:
             kafka_sender=self.kafka_sender
         )
         self.running = False
+        
+        # Initialize breakdown simulator
+        breakdown_config = BreakdownConfig(
+            enabled=False,  # Start disabled, can be enabled via API
+            breakdown_rate_per_hour=0.1
+        )
+        self.breakdown_simulator = MachineBreakdownSimulator(breakdown_config)
         
         # Set callback for new lots
         self.kafka_sender.set_lot_callback(self.production_coordinator.add_lot)
@@ -70,7 +78,15 @@ class CoffeeMekSimulator:
         })
         await self.production_coordinator.initialize_machines(machine_config)
         
+        # Register the single machine pool with breakdown simulator for all locations
+        locations = ["Italy", "Brazil", "Vietnam"]
+        for location in locations:
+            self.breakdown_simulator.register_machine_pool(location, self.production_coordinator.machine_pool)
+        
         self.running = True
+        
+        # Start breakdown simulation (starts disabled, will be enabled via API)
+        self.breakdown_simulator.start_simulation()
         
         # Start concurrent tasks
         tasks = [
@@ -97,6 +113,7 @@ class CoffeeMekSimulator:
         self.running = False
         
         # Stop components
+        self.breakdown_simulator.stop_simulation()
         await self.production_coordinator.stop()
         await self.kafka_sender.stop()
         await self.health_server.stop()

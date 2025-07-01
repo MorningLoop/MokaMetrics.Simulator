@@ -11,6 +11,7 @@ export interface ApiResponse<T = any> {
 export interface LotData {
   customer: string
   quantity: number
+  location?: string
   orderDate?: string
   deadline?: string
 }
@@ -18,6 +19,19 @@ export interface LotData {
 export interface MachineMaintenanceRequest {
   machineId: string
   action: 'start' | 'complete'
+}
+
+export interface MachineBreakdownRequest {
+  machine_id: string
+  location: string
+  breakdown_type?: string
+  reason?: string
+  severity?: string
+}
+
+export interface MachineResetRequest {
+  machine_id: string
+  location: string
 }
 
 class ApiService {
@@ -90,6 +104,42 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify(request),
     })
+  }
+
+  // Machine breakdown methods
+  async triggerMachineBreakdown(request: MachineBreakdownRequest): Promise<ApiResponse> {
+    return this.request('/machine/breakdown', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  }
+
+  async resetMachineBreakdown(request: MachineResetRequest): Promise<ApiResponse> {
+    return this.request('/machine/reset', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  }
+
+  async resetAllMachines(): Promise<ApiResponse> {
+    return this.request('/machines/reset-all', {
+      method: 'POST',
+    })
+  }
+
+  async getBreakdownStats(): Promise<ApiResponse> {
+    return this.request('/machines/breakdown-stats')
+  }
+
+  async updateBreakdownConfig(config: { enabled?: boolean; breakdown_rate_per_hour?: number }): Promise<ApiResponse> {
+    return this.request('/breakdown/config', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    })
+  }
+
+  async getBreakdownConfig(): Promise<ApiResponse> {
+    return this.request('/breakdown/config')
   }
 
   // Health check

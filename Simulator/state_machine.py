@@ -185,6 +185,54 @@ class Machine:
     in_maintenance: bool = False
     maintenance_reason: Optional[str] = None
     maintenance_started: Optional[datetime] = None
+    
+    # Machine breakdown fields
+    is_broken: bool = False
+    breakdown_type: Optional[str] = None
+    breakdown_reason: Optional[str] = None
+    breakdown_start_time: Optional[datetime] = None
+    breakdown_severity: str = "minor"  # minor, major, critical
+    
+    def get_status(self) -> str:
+        """Get machine status for display"""
+        if self.is_broken:
+            return "error"
+        elif self.in_maintenance:
+            return "maintenance"
+        elif self.is_busy:
+            return "running"
+        else:
+            return "idle"
+    
+    def trigger_breakdown(self, breakdown_type: str, reason: str, severity: str = "minor"):
+        """Trigger a machine breakdown"""
+        self.is_broken = True
+        self.breakdown_type = breakdown_type
+        self.breakdown_reason = reason
+        self.breakdown_start_time = datetime.now()
+        self.breakdown_severity = severity
+        
+        # If machine was busy, stop the current operation
+        if self.is_busy:
+            self.is_busy = False
+            self.current_piece = None
+            self.current_lot = None
+            self.busy_since = None
+            self.expected_completion = None
+    
+    def reset_breakdown(self):
+        """Reset machine from breakdown state"""
+        self.is_broken = False
+        self.breakdown_type = None
+        self.breakdown_reason = None
+        self.breakdown_start_time = None
+        self.breakdown_severity = "minor"
+    
+    def get_breakdown_duration_minutes(self) -> float:
+        """Get breakdown duration in minutes"""
+        if self.breakdown_start_time:
+            return (datetime.now() - self.breakdown_start_time).total_seconds() / 60
+        return 0.0
 
 class ProductionQueue:
     """FIFO queue for each production stage - now handles individual pieces with thread safety"""
@@ -305,7 +353,7 @@ class MachinePool:
         """Get an available machine of specified type in location (thread-safe)"""
         async with self._lock:
             for machine in self.machines.get(machine_type, []):
-                if not machine.is_busy and not machine.in_maintenance and machine.location == location:
+                if not machine.is_busy and not machine.in_maintenance and not machine.is_broken and machine.location == location:
                     return machine
             return None
 
@@ -387,6 +435,76 @@ class MachinePool:
     def get_machines_in_maintenance(self) -> List[Machine]:
         """Get all machines currently in maintenance"""
         return [machine for machine in self.all_machines.values() if machine.in_maintenance]
+    
+    async def trigger_machine_breakdown(self, machine_id: str, breakdown_type: str = None, reason: str = None, severity: str = "minor"):
+        """Trigger a breakdown on a specific machine (thread-safe)"""
+        async with self._lock:
+            machine = self.all_machines.get(machine_id)
+            if machine and not machine.is_broken and not machine.in_maintenance:
+                machine.trigger_breakdown(breakdown_type or "mechanical", reason or "Manual breakdown", severity)
+                
+                # Update machine simulator status
+                from .Machine import get_machine_simulator
+                simulator = get_machine_simulator(machine_id, machine.machine_type, machine.location)
+                if simulator:
+                    simulator.update_status("error")
+                
+                logger.warning(f"Machine {machine_id} breakdown triggered: {machine.breakdown_type} - {machine.breakdown_reason}")
+                return True
+            return False
+    
+    async def reset_machine_breakdown(self, machine_id: str):
+        """Reset a machine from breakdown state (thread-safe)"""
+        async with self._lock:
+            machine = self.all_machines.get(machine_id)
+            if machine and machine.is_broken:
+                machine.reset_breakdown()
+                
+                # Update machine simulator status
+                from .Machine import get_machine_simulator
+                simulator = get_machine_simulator(machine_id, machine.machine_type, machine.location)
+                if simulator:
+                    if machine.is_busy and machine.current_lot:
+                        simulator.update_status("working")
+                    else:
+                        simulator.update_status("idle")
+                
+                logger.info(f"Machine {machine_id} reset from breakdown")
+                return True
+            return False
+    
+    async def reset_all_machine_breakdowns(self):
+        """Reset all machines from breakdown state (thread-safe)"""
+        async with self._lock:
+            reset_count = 0
+            for machine in self.all_machines.values():
+                if machine.is_broken:
+                    machine.reset_breakdown()
+                    reset_count += 1
+                    
+                    # Update machine simulator status
+                    from .Machine import get_machine_simulator
+                    simulator = get_machine_simulator(machine.machine_id, machine.machine_type, machine.location)
+                    if simulator:
+                        if machine.is_busy and machine.current_lot:
+                            simulator.update_status("working")
+                        else:
+                            simulator.update_status("idle")
+            
+            logger.info(f"Reset {reset_count} machines from breakdown state")
+            return reset_count
+    
+    def get_broken_machines(self) -> List[Machine]:
+        """Get all machines currently broken"""
+        return [machine for machine in self.all_machines.values() if machine.is_broken]
+    
+    def get_machine(self, machine_id: str) -> Optional[Machine]:
+        """Get a specific machine by ID"""
+        return self.all_machines.get(machine_id)
+    
+    def get_all_machines(self) -> List[Machine]:
+        """Get all machines in the pool"""
+        return list(self.all_machines.values())
 
     def get_machine_status(self) -> Dict[str, Any]:
         """Get status of all machines"""
@@ -395,8 +513,9 @@ class MachinePool:
             status[machine_type] = {
                 "total": len(machines),
                 "busy": sum(1 for m in machines if m.is_busy),
-                "available": sum(1 for m in machines if not m.is_busy and not m.in_maintenance),
-                "maintenance": sum(1 for m in machines if m.in_maintenance)
+                "available": sum(1 for m in machines if not m.is_busy and not m.in_maintenance and not m.is_broken),
+                "maintenance": sum(1 for m in machines if m.in_maintenance),
+                "broken": sum(1 for m in machines if m.is_broken)
             }
         return status
 

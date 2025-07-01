@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Package, Plus, Play, Calendar, User, Hash } from 'lucide-react'
+import { Package, Plus, Play, Calendar, User, Hash, MapPin } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge'
 interface LotData {
   customer: string
   quantity: number
+  location?: string
   orderDate?: string
   deadline?: string
 }
@@ -26,6 +27,7 @@ export function LotProcessingPanel({
 }: LotProcessingPanelProps) {
   const [customer, setCustomer] = useState('')
   const [quantity, setQuantity] = useState<number>(1)
+  const [location, setLocation] = useState('Italy')
   const [orderDate, setOrderDate] = useState('')
   const [deadline, setDeadline] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -59,17 +61,19 @@ export function LotProcessingPanel({
       const lotData: LotData = {
         customer: customer.trim(),
         quantity,
+        location,
         orderDate: orderDate || undefined,
         deadline: deadline || undefined
       }
 
       await onAddLot(lotData)
       
-      setSuccess(`Lot added successfully for ${customer} (${quantity} units)`)
+      setSuccess(`Lot added successfully for ${customer} (${quantity} units) at ${location}`)
       
       // Reset form
       setCustomer('')
       setQuantity(1)
+      setLocation('Italy')
       setOrderDate('')
       setDeadline('')
       
@@ -110,8 +114,11 @@ export function LotProcessingPanel({
   }
 
   const fillRandomData = () => {
+    const locations = ['Italy', 'Brazil', 'Vietnam']
+    
     setCustomer(getRandomCustomer())
     setQuantity(Math.floor(Math.random() * 50) + 10) // 10-59
+    setLocation(locations[Math.floor(Math.random() * locations.length)])
     
     const today = new Date()
     const orderDate = new Date(today.getTime() - Math.random() * 7 * 24 * 60 * 60 * 1000) // Last 7 days
@@ -200,6 +207,24 @@ export function LotProcessingPanel({
               className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               required
             />
+          </div>
+
+          {/* Location Selector */}
+          <div className="space-y-1">
+            <label className="text-xs font-medium flex items-center gap-1">
+              <MapPin className="h-3 w-3" />
+              Location
+            </label>
+            <select
+              value={location}
+              onChange={(e) => setLocation(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              required
+            >
+              <option value="Italy">🇮🇹 Italy</option>
+              <option value="Brazil">🇧🇷 Brazil</option>
+              <option value="Vietnam">🇻🇳 Vietnam</option>
+            </select>
           </div>
 
           {/* Date Inputs */}

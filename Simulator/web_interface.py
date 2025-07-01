@@ -106,6 +106,14 @@ class WebInterface:
         self.app.router.add_post('/api/machine_maintenance', self.machine_maintenance_handler)
         self.app.router.add_get('/api/machines', self.machines_handler)
         self.app.router.add_get('/api/status', self.status_handler)
+        
+        # Machine breakdown API routes
+        self.app.router.add_post('/api/machine/breakdown', self.trigger_machine_breakdown_handler)
+        self.app.router.add_post('/api/machine/reset', self.reset_machine_breakdown_handler)
+        self.app.router.add_post('/api/machines/reset-all', self.reset_all_machines_handler)
+        self.app.router.add_get('/api/machines/breakdown-stats', self.breakdown_stats_handler)
+        self.app.router.add_post('/api/breakdown/config', self.update_breakdown_config_handler)
+        self.app.router.add_get('/api/breakdown/config', self.get_breakdown_config_handler)
 
         # Static file serving for React build
         if self.react_build_path:
@@ -2050,6 +2058,258 @@ class WebInterface:
         stats["simulator_running"] = self.running
         return web.json_response(stats)
     
+    async def trigger_machine_breakdown_handler(self, request):
+        """Trigger a breakdown on a specific machine"""
+        try:
+            data = await request.json()
+            machine_id = data.get('machine_id')
+            location = data.get('location')
+            breakdown_type = data.get('breakdown_type', 'mechanical')
+            reason = data.get('reason', 'Manual breakdown triggered')
+            severity = data.get('severity', 'minor')
+            
+            if not machine_id or not location:
+                return web.json_response({
+                    "success": False, 
+                    "error": "machine_id and location are required"
+                })
+            
+            if not self.simulator or not self.running:
+                return web.json_response({
+                    "success": False, 
+                    "error": "Simulator not running"
+                })
+            
+            # Use the single machine pool (all machines are in one pool)
+            machine_pool = self.simulator.production_coordinator.machine_pool
+            
+            # Trigger the breakdown
+            success = await machine_pool.trigger_machine_breakdown(machine_id, breakdown_type, reason, severity)
+            
+            if success:
+                return web.json_response({
+                    "success": True, 
+                    "message": f"Breakdown triggered on machine {machine_id}"
+                })
+            else:
+                return web.json_response({
+                    "success": False, 
+                    "error": f"Failed to trigger breakdown on machine {machine_id}"
+                })
+                
+        except Exception as e:
+            logger.error(f"Error triggering machine breakdown: {e}")
+            return web.json_response({"success": False, "error": str(e)})
+    
+    async def reset_machine_breakdown_handler(self, request):
+        """Reset a machine from breakdown state"""
+        try:
+            data = await request.json()
+            machine_id = data.get('machine_id')
+            location = data.get('location')
+            
+            if not machine_id or not location:
+                return web.json_response({
+                    "success": False, 
+                    "error": "machine_id and location are required"
+                })
+            
+            if not self.simulator or not self.running:
+                return web.json_response({
+                    "success": False, 
+                    "error": "Simulator not running"
+                })
+            
+            # Use the single machine pool (all machines are in one pool)
+            machine_pool = self.simulator.production_coordinator.machine_pool
+            
+            # Reset the breakdown
+            success = await machine_pool.reset_machine_breakdown(machine_id)
+            
+            if success:
+                return web.json_response({
+                    "success": True, 
+                    "message": f"Machine {machine_id} reset from breakdown"
+                })
+            else:
+                return web.json_response({
+                    "success": False, 
+                    "error": f"Failed to reset machine {machine_id} or machine not in breakdown state"
+                })
+                
+        except Exception as e:
+            logger.error(f"Error resetting machine breakdown: {e}")
+            return web.json_response({"success": False, "error": str(e)})
+    
+    async def reset_all_machines_handler(self, request):
+        """Reset all machines from breakdown state"""
+        try:
+            if not self.simulator or not self.running:
+                return web.json_response({
+                    "success": False, 
+                    "error": "Simulator not running"
+                })
+            
+            machine_pool = self.simulator.production_coordinator.machine_pool
+            total_reset = await machine_pool.reset_all_machine_breakdowns()
+            
+            return web.json_response({
+                "success": True, 
+                "message": f"Reset {total_reset} machines from breakdown state",
+                "reset_count": total_reset
+            })
+                
+        except Exception as e:
+            logger.error(f"Error resetting all machines: {e}")
+            return web.json_response({"success": False, "error": str(e)})
+    
+    async def breakdown_stats_handler(self, request):
+        """Get machine breakdown statistics"""
+        try:
+            if not self.simulator or not self.running:
+                return web.json_response({
+                    "success": False, 
+                    "error": "Simulator not running"
+                })
+            
+            stats = {
+                "total_machines": 0,
+                "broken_machines": 0,
+                "operational_machines": 0,
+                "breakdown_rate": 0,
+                "breakdown_by_type": {},
+                "breakdown_by_severity": {},
+                "breakdown_by_location": {}
+            }
+            
+            # Get all machines from the single machine pool
+            machine_pool = self.simulator.production_coordinator.machine_pool
+            machines = machine_pool.get_all_machines()
+            
+            # Group machines by location for statistics
+            location_stats = {}
+            
+            for machine in machines:
+                location = machine.location
+                if location not in location_stats:
+                    location_stats[location] = {"total": 0, "broken": 0}
+                
+                location_stats[location]["total"] += 1
+                stats["total_machines"] += 1
+                
+                if machine.is_broken:
+                    stats["broken_machines"] += 1
+                    location_stats[location]["broken"] += 1
+                    
+                    # Count by type
+                    breakdown_type = machine.breakdown_type or "unknown"
+                    stats["breakdown_by_type"][breakdown_type] = stats["breakdown_by_type"].get(breakdown_type, 0) + 1
+                    
+                    # Count by severity
+                    severity = machine.breakdown_severity
+                    stats["breakdown_by_severity"][severity] = stats["breakdown_by_severity"].get(severity, 0) + 1
+            
+            # Convert location stats
+            for location, loc_stats in location_stats.items():
+                stats["breakdown_by_location"][location] = {
+                    "total": loc_stats["total"],
+                    "broken": loc_stats["broken"],
+                    "operational": loc_stats["total"] - loc_stats["broken"]
+                }
+            
+            stats["operational_machines"] = stats["total_machines"] - stats["broken_machines"]
+            if stats["total_machines"] > 0:
+                stats["breakdown_rate"] = round((stats["broken_machines"] / stats["total_machines"]) * 100, 2)
+            
+            return web.json_response({
+                "success": True, 
+                "stats": stats
+            })
+                
+        except Exception as e:
+            logger.error(f"Error getting breakdown stats: {e}")
+            return web.json_response({"success": False, "error": str(e)})
+    
+    async def update_breakdown_config_handler(self, request):
+        """Update breakdown simulation configuration"""
+        try:
+            data = await request.json()
+            
+            if not self.simulator or not self.running:
+                return web.json_response({
+                    "success": False, 
+                    "error": "Simulator not running"
+                })
+            
+            # Update breakdown simulator config
+            breakdown_simulator = self.simulator.breakdown_simulator
+            current_config = breakdown_simulator.config
+            
+            # Create a new config object with current values
+            from .breakdown_simulator import BreakdownConfig
+            new_config = BreakdownConfig(
+                enabled=current_config.enabled,
+                breakdown_rate_per_hour=current_config.breakdown_rate_per_hour,
+                min_interval_minutes=current_config.min_interval_minutes,
+                max_interval_minutes=current_config.max_interval_minutes,
+                breakdown_types=current_config.breakdown_types.copy(),
+                breakdown_reasons={k: v.copy() for k, v in current_config.breakdown_reasons.items()},
+                severity_distribution=current_config.severity_distribution.copy()
+            )
+            
+            # Update config fields if provided
+            if 'enabled' in data:
+                new_config.enabled = data['enabled']
+                logger.info(f"Breakdown simulation {'enabled' if new_config.enabled else 'disabled'}")
+            
+            if 'breakdown_rate_per_hour' in data:
+                rate = max(0, min(500, data['breakdown_rate_per_hour']))  # Clamp to 0-500 for testing
+                new_config.breakdown_rate_per_hour = rate / 100.0  # Convert percentage to decimal
+                logger.info(f"Breakdown rate set to {rate}% per hour")
+            
+            # Apply the updated config
+            breakdown_simulator.update_config(new_config)
+            
+            return web.json_response({
+                "success": True,
+                "message": "Breakdown configuration updated",
+                "config": {
+                    "enabled": new_config.enabled,
+                    "breakdown_rate_per_hour": new_config.breakdown_rate_per_hour * 100  # Convert back to percentage
+                }
+            })
+                
+        except Exception as e:
+            logger.error(f"Error updating breakdown config: {e}")
+            return web.json_response({"success": False, "error": str(e)})
+    
+    async def get_breakdown_config_handler(self, request):
+        """Get current breakdown simulation configuration"""
+        try:
+            if not self.simulator or not self.running:
+                return web.json_response({
+                    "success": False, 
+                    "error": "Simulator not running"
+                })
+            
+            config = self.simulator.breakdown_simulator.config
+            
+            return web.json_response({
+                "success": True,
+                "config": {
+                    "enabled": config.enabled,
+                    "breakdown_rate_per_hour": config.breakdown_rate_per_hour * 100,  # Convert to percentage
+                    "min_interval_minutes": config.min_interval_minutes,
+                    "max_interval_minutes": config.max_interval_minutes,
+                    "breakdown_types": config.breakdown_types,
+                    "severity_distribution": config.severity_distribution
+                }
+            })
+                
+        except Exception as e:
+            logger.error(f"Error getting breakdown config: {e}")
+            return web.json_response({"success": False, "error": str(e)})
+    
     async def broadcast_stats(self):
         """Broadcast statistics to all connected WebSocket clients"""
         while True:
@@ -2058,6 +2318,31 @@ class WebInterface:
                     # Get base stats
                     stats = monitor.get_current_stats()
                     stats["simulator_running"] = self.running
+                    
+                    # Enhance machine utilization with breakdown information
+                    if self.simulator and hasattr(self.simulator, 'production_coordinator'):
+                        enhanced_machine_utilization = []
+                        for machine_stat in stats.get("machine_utilization", []):
+                            machine_id = machine_stat["machine_id"]
+                            location = machine_stat["location"]
+                            
+                            # Get the actual machine object for breakdown info
+                            machine_pool = self.simulator.production_coordinator.machine_pool
+                            actual_machine = machine_pool.get_machine(machine_id)
+                            if actual_machine:
+                                    # Add breakdown information to the machine stats
+                                    machine_stat["is_broken"] = getattr(actual_machine, 'is_broken', False)
+                                    machine_stat["breakdown_type"] = getattr(actual_machine, 'breakdown_type', None)
+                                    machine_stat["breakdown_reason"] = getattr(actual_machine, 'breakdown_reason', None)
+                                    machine_stat["breakdown_severity"] = getattr(actual_machine, 'breakdown_severity', None)
+                                    if hasattr(actual_machine, 'get_breakdown_duration_minutes'):
+                                        machine_stat["breakdown_duration"] = actual_machine.get_breakdown_duration_minutes()
+                                    else:
+                                        machine_stat["breakdown_duration"] = 0
+                            
+                            enhanced_machine_utilization.append(machine_stat)
+                        
+                        stats["machine_utilization"] = enhanced_machine_utilization
 
                     # Send to all connected clients
                     disconnected = set()

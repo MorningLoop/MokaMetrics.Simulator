@@ -13,6 +13,7 @@ import { LotProcessingPanel } from "./components/simulator/LotProcessingPanel";
 import { Login } from "./components/auth/Login";
 import { apiService, handleApiCall } from "./services/api";
 import { useAuthStore } from "./stores/authStore";
+import { MachineBreakdownControl } from "./components/MachineBreakdown";
 
 interface ProductionDataPoint {
     time: string;
@@ -39,19 +40,33 @@ function AuthenticatedApp() {
 
     // API handlers
     const handleStartSimulator = async () => {
-        await handleApiCall(
+        const success = await handleApiCall(
             () => apiService.startSimulator(),
             () => console.log("Simulator started successfully"),
-            (error) => console.error("Failed to start simulator:", error)
+            (error) => {
+                console.error("Failed to start simulator:", error)
+                // Throw error to be caught by SimulatorControls
+                throw new Error(error)
+            }
         );
+        if (!success) {
+            throw new Error("Failed to start simulator")
+        }
     };
 
     const handleStopSimulator = async () => {
-        await handleApiCall(
+        const success = await handleApiCall(
             () => apiService.stopSimulator(),
             () => console.log("Simulator stopped successfully"),
-            (error) => console.error("Failed to stop simulator:", error)
+            (error) => {
+                console.error("Failed to stop simulator:", error)
+                // Throw error to be caught by SimulatorControls
+                throw new Error(error)
+            }
         );
+        if (!success) {
+            throw new Error("Failed to stop simulator")
+        }
     };
 
     const handleMachineMaintenance = async (machineId: string) => {
@@ -111,9 +126,14 @@ function AuthenticatedApp() {
                     is_busy: boolean,
                     machine_type: string,
                     maintenance_mode?: boolean,
-                    in_maintenance?: boolean
+                    in_maintenance?: boolean,
+                    is_broken?: boolean
                 ): "running" | "idle" | "maintenance" | "error" => {
-                    // Check for maintenance status first
+                    // Check for breakdown status first
+                    if (is_broken) {
+                        return "error";
+                    }
+                    // Check for maintenance status
                     if (maintenance_mode || in_maintenance || machine_type.includes("maintenance")) {
                         return "maintenance";
                     }
@@ -187,13 +207,19 @@ function AuthenticatedApp() {
                         machine.is_busy,
                         machine.machine_type,
                         machine.maintenance_mode,
-                        machine.in_maintenance
+                        machine.in_maintenance,
+                        machine.is_broken
                     ),
                     currentLot: machine.current_lot || undefined,
                     progress: calculateProgress(),
                     facility: machine.location,
                     throughput: machine.lots_processed,
                     lastUpdate: new Date(),
+                    // Breakdown information
+                    breakdown_type: machine.breakdown_type,
+                    breakdown_reason: machine.breakdown_reason,
+                    breakdown_severity: machine.breakdown_severity,
+                    breakdown_duration: machine.breakdown_duration,
                 };
             });
 
@@ -433,6 +459,11 @@ function AuthenticatedApp() {
                         onStart={handleStartSimulator}
                         onStop={handleStopSimulator}
                     />
+                </div>
+
+                {/* Machine Breakdown Control */}
+                <div className="mb-6">
+                    <MachineBreakdownControl />
                 </div>
 
                 {/* Main Dashboard Grid */}

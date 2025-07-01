@@ -237,8 +237,9 @@ class SimulatorMonitor:
                     })
             
             # Get machine utilization
-            machine_utilization = [
-                {
+            machine_utilization = []
+            for machine in self.machine_stats.values():
+                machine_data = {
                     "machine_id": machine.machine_id,
                     "machine_type": machine.machine_type,
                     "location": machine.location,
@@ -248,8 +249,13 @@ class SimulatorMonitor:
                     "lots_processed": machine.lots_processed,
                     "total_processing_time_minutes": round(machine.total_processing_time, 2)
                 }
-                for machine in self.machine_stats.values()
-            ]
+                
+                # Add breakdown information if available (from production coordinator)
+                # We need to get this from the actual machine object, not the monitor stats
+                machine_data["in_maintenance"] = getattr(machine, 'in_maintenance', False)
+                machine_data["maintenance_mode"] = getattr(machine, 'maintenance_mode', False)
+                
+                machine_utilization.append(machine_data)
             
             # Get queue status
             queue_status = [

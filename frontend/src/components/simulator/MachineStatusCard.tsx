@@ -1,7 +1,10 @@
-import { Settings, Activity, Clock, Package } from 'lucide-react'
+import { Settings, Activity, Clock, Package, AlertTriangle, RotateCcw } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { useMachineBreakdownStore } from '../../stores/machineBreakdownStore'
+import { apiService, handleApiCall } from '../../services/api'
+import { useState } from 'react'
 
 export interface MachineData {
   id: string
@@ -13,6 +16,11 @@ export interface MachineData {
   lastUpdate?: Date
   facility?: string
   throughput?: number
+  // Breakdown-specific fields
+  breakdown_type?: string
+  breakdown_reason?: string
+  breakdown_severity?: string
+  breakdown_duration?: number
 }
 
 interface MachineStatusCardProps {
@@ -21,6 +29,47 @@ interface MachineStatusCardProps {
 }
 
 export function MachineStatusCard({ machine, onMaintenance }: MachineStatusCardProps) {
+  const { selectedBreakdownType, selectedSeverity } = useMachineBreakdownStore();
+  const [loading, setLoading] = useState(false);
+
+  const handleTriggerBreakdown = async () => {
+    if (!machine.facility) return;
+    
+    setLoading(true);
+    try {
+      await handleApiCall(
+        () => apiService.triggerMachineBreakdown({
+          machine_id: machine.id,
+          location: machine.facility!,
+          breakdown_type: selectedBreakdownType,
+          severity: selectedSeverity,
+          reason: `Manual ${selectedBreakdownType} breakdown triggered`
+        }),
+        () => console.log(`Breakdown triggered on ${machine.id}`),
+        (error) => console.error(`Failed to trigger breakdown: ${error}`)
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResetBreakdown = async () => {
+    if (!machine.facility) return;
+    
+    setLoading(true);
+    try {
+      await handleApiCall(
+        () => apiService.resetMachineBreakdown({
+          machine_id: machine.id,
+          location: machine.facility!
+        }),
+        () => console.log(`Reset breakdown on ${machine.id}`),
+        (error) => console.error(`Failed to reset breakdown: ${error}`)
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'running':
@@ -136,19 +185,88 @@ export function MachineStatusCard({ machine, onMaintenance }: MachineStatusCardP
           )}
         </div>
 
-        {/* Maintenance Button */}
-        {onMaintenance && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="w-full"
-            onClick={() => onMaintenance(machine.id)}
-            disabled={machine.status === 'maintenance'}
-          >
-            <Settings className="h-4 w-4 mr-2" />
-            {machine.status === 'maintenance' ? 'In Maintenance' : 'Maintenance'}
-          </Button>
+        {/* Breakdown Information */}
+        {machine.status === 'error' && (machine.breakdown_type || machine.breakdown_reason) && (
+          <div className="bg-red-50 border border-red-200 rounded p-3 space-y-2">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-red-600" />
+              <span className="text-sm font-semibold text-red-800">Machine Breakdown</span>
+            </div>
+            
+            {machine.breakdown_type && (
+              <div className="text-xs">
+                <span className="font-medium">Type:</span> {machine.breakdown_type}
+              </div>
+            )}
+            
+            {machine.breakdown_reason && (
+              <div className="text-xs">
+                <span className="font-medium">Reason:</span> {machine.breakdown_reason}
+              </div>
+            )}
+            
+            {machine.breakdown_severity && (
+              <div className="text-xs">
+                <span className="font-medium">Severity:</span> 
+                <span className={`ml-1 px-2 py-0.5 rounded text-xs ${
+                  machine.breakdown_severity === 'critical' ? 'bg-red-200 text-red-800' :
+                  machine.breakdown_severity === 'major' ? 'bg-orange-200 text-orange-800' :
+                  'bg-yellow-200 text-yellow-800'
+                }`}>
+                  {machine.breakdown_severity}
+                </span>
+              </div>
+            )}
+            
+            {machine.breakdown_duration && (
+              <div className="text-xs">
+                <span className="font-medium">Duration:</span> {machine.breakdown_duration.toFixed(1)} min
+              </div>
+            )}
+          </div>
         )}
+
+        {/* Action Buttons */}
+        <div className="space-y-2">
+          {/* Maintenance Button */}
+          {onMaintenance && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              onClick={() => onMaintenance(machine.id)}
+              disabled={machine.status === 'maintenance' || loading}
+            >
+              <Settings className="h-4 w-4 mr-2" />
+              {machine.status === 'maintenance' ? 'In Maintenance' : 'Maintenance'}
+            </Button>
+          )}
+          
+          {/* Breakdown Control Buttons */}
+          {machine.status === 'error' ? (
+            <Button
+              variant="default"
+              size="sm"
+              className="w-full bg-green-600 hover:bg-green-700"
+              onClick={handleResetBreakdown}
+              disabled={loading}
+            >
+              <RotateCcw className="h-4 w-4 mr-2" />
+              {loading ? 'Resetting...' : 'Reset Breakdown'}
+            </Button>
+          ) : (
+            <Button
+              variant="destructive"
+              size="sm"
+              className="w-full"
+              onClick={handleTriggerBreakdown}
+              disabled={machine.status === 'maintenance' || loading}
+            >
+              <AlertTriangle className="h-4 w-4 mr-2" />
+              {loading ? 'Triggering...' : 'Trigger Breakdown'}
+            </Button>
+          )}
+        </div>
       </CardContent>
     </Card>
   )
